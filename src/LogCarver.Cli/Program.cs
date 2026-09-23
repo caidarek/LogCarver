@@ -36,6 +36,17 @@ if (schema.Count == 0)
     return 1;
 }
 
+var ddlBoundaries = await DdlBoundaryReader.GetDdlBoundariesAsync(connection, tableName);
+var ddlBoundaryLsns = ddlBoundaries.Select(b => b.Lsn).ToList();
+if (ddlBoundaries.Count > 0)
+{
+    Console.WriteLine($"Detected {ddlBoundaries.Count} schema-changing DDL boundary(ies) for {tableName}:");
+    foreach (var b in ddlBoundaries)
+        Console.WriteLine($"  LSN {b.Lsn}: {b.TransactionName ?? "(unnamed transaction)"}");
+    Console.WriteLine("Records older than the newest boundary will be refused, not guessed.");
+    Console.WriteLine();
+}
+
 var records = await FnDblogReader.ReadClusteredRecordsAsync(connection, tableName);
 Console.WriteLine($"{records.Count} log record(s) for {tableName}:");
 Console.WriteLine();
@@ -45,11 +56,11 @@ foreach (var record in records)
     switch (record.Operation)
     {
         case "LOP_INSERT_ROWS" when record.RowLogContents0 is { Length: > 0 } bytes:
-            PrintRow(record.Lsn, "INSERT", bytes, schema);
+            PrintRow(record.Lsn, "INSERT", bytes, schema, ddlBoundaryLsns);
             break;
 
         case "LOP_DELETE_ROWS" when record.RowLogContents0 is { Length: > 0 } bytes:
-            PrintRow(record.Lsn, "DELETE", bytes, schema);
+            PrintRow(record.Lsn, "DELETE", bytes, schema, ddlBoundaryLsns);
             break;
 
         case "LOP_MODIFY_ROW" or "LOP_MODIFY_COLUMNS":
@@ -63,13 +74,17 @@ foreach (var record in records)
 
 return 0;
 
-static void PrintRow(string lsn, string label, byte[] rowBytes, IReadOnlyList<ColumnSchema> schema)
+static void PrintRow(string lsn, string label, byte[] rowBytes, IReadOnlyList<ColumnSchema> schema, IReadOnlyList<string> ddlBoundaryLsns)
 {
     try
     {
-        var decoded = RowDecoder.Decode(rowBytes, schema);
+        var decoded = RowDecoder.Decode(rowBytes, schema, lsn, ddlBoundaryLsns);
         var fields = string.Join(", ", decoded.Select(kv => $"{kv.Key}={kv.Value ?? "NULL"}"));
         Console.WriteLine($"[{lsn}] {label}: {fields}");
+    }
+    catch (SchemaDriftException ex)
+    {
+        Console.WriteLine($"[{lsn}] {label}: REFUSED - {ex.Message}");
     }
     catch (NotSupportedException ex)
     {

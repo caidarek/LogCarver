@@ -36,6 +36,26 @@ public static class RowDecoder
     private const int TypeInt = 56;
     private const int TypeDateTime2 = 42;
 
+    /// <summary>
+    /// Decodes a row, first refusing (via <see cref="SchemaDriftException"/>)
+    /// if <paramref name="recordLsn"/> predates any LSN in
+    /// <paramref name="ddlBoundaryLsns"/>. Boundaries come from
+    /// <c>LogCarver.Core.SqlServer.DdlBoundaryReader</c>; this overload
+    /// takes plain LSN strings to keep the decoder itself independent of
+    /// any SQL Server connectivity type.
+    /// </summary>
+    public static IReadOnlyDictionary<string, object?> Decode(
+        ReadOnlySpan<byte> row, IReadOnlyList<ColumnSchema> schema,
+        string recordLsn, IReadOnlyList<string> ddlBoundaryLsns)
+    {
+        foreach (var boundaryLsn in ddlBoundaryLsns)
+        {
+            if (string.CompareOrdinal(recordLsn, boundaryLsn) < 0)
+                throw new SchemaDriftException(recordLsn, boundaryLsn);
+        }
+        return Decode(row, schema);
+    }
+
     public static IReadOnlyDictionary<string, object?> Decode(ReadOnlySpan<byte> row, IReadOnlyList<ColumnSchema> schema)
     {
         byte tagA = row[0];
