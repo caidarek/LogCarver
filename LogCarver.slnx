@@ -1,0 +1,9 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/LogCarver.Cli/LogCarver.Cli.csproj" />
+    <Project Path="src/LogCarver.Core/LogCarver.Core.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/LogCarver.Core.Tests/LogCarver.Core.Tests.csproj" />
+  </Folder>
+</Solution>
