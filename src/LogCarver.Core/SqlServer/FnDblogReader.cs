@@ -5,6 +5,11 @@ namespace LogCarver.Core.SqlServer;
 /// <summary>
 /// Reads row-level log records from fn_dblog for one table.
 ///
+/// Context filter: INSERT/UPDATE use Context='LCX_CLUSTERED', but DELETE
+/// uses 'LCX_MARK_AS_GHOST' (SQL Server marks deleted rows as ghosts
+/// in-place before background cleanup expunges them) - both must be
+/// included or every DELETE silently disappears from the results.
+///
 /// Scope note: only reads the live/active portion of the log that
 /// fn_dblog exposes. Recovering data from VLFs that are reusable but not
 /// yet overwritten requires reading the LDF file directly and is not
@@ -15,9 +20,11 @@ public static class FnDblogReader
     private const string Sql = """
         SELECT [Current LSN] AS Lsn, [Operation] AS Operation, [Context] AS Context,
                [Offset in Row] AS OffsetInRow, [AllocUnitName] AS AllocUnitName,
+               [Page ID] AS PageId, [Slot ID] AS SlotId,
                [RowLog Contents 0] AS Rlc0, [RowLog Contents 1] AS Rlc1
         FROM fn_dblog(NULL, NULL)
-        WHERE [AllocUnitName] LIKE @allocPattern AND [Context] = 'LCX_CLUSTERED'
+        WHERE [AllocUnitName] LIKE @allocPattern
+          AND [Context] IN ('LCX_CLUSTERED', 'LCX_MARK_AS_GHOST')
         ORDER BY [Current LSN];
         """;
 
@@ -41,6 +48,8 @@ public static class FnDblogReader
         int ordCtx = reader.GetOrdinal("Context");
         int ordOffset = reader.GetOrdinal("OffsetInRow");
         int ordAlloc = reader.GetOrdinal("AllocUnitName");
+        int ordPage = reader.GetOrdinal("PageId");
+        int ordSlot = reader.GetOrdinal("SlotId");
         int ordRlc0 = reader.GetOrdinal("Rlc0");
         int ordRlc1 = reader.GetOrdinal("Rlc1");
 
@@ -52,6 +61,8 @@ public static class FnDblogReader
                 Context: reader.GetString(ordCtx),
                 OffsetInRow: reader.IsDBNull(ordOffset) ? null : reader.GetInt16(ordOffset),
                 AllocUnitName: reader.IsDBNull(ordAlloc) ? null : reader.GetString(ordAlloc),
+                PageId: reader.IsDBNull(ordPage) ? null : reader.GetString(ordPage),
+                SlotId: reader.IsDBNull(ordSlot) ? null : reader.GetInt32(ordSlot),
                 RowLogContents0: reader.IsDBNull(ordRlc0) ? null : (byte[])reader[ordRlc0],
                 RowLogContents1: reader.IsDBNull(ordRlc1) ? null : (byte[])reader[ordRlc1]));
         }

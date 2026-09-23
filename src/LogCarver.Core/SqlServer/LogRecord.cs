@@ -7,5 +7,7 @@ public sealed record LogRecord(
     string Context,
     int? OffsetInRow,
     string? AllocUnitName,
+    string? PageId,
+    int? SlotId,
     byte[]? RowLogContents0,
     byte[]? RowLogContents1);

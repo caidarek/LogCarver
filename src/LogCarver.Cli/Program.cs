@@ -1,4 +1,3 @@
-using LogCarver.Core;
 using LogCarver.Core.SqlServer;
 using Microsoft.Data.SqlClient;
 
@@ -48,46 +47,38 @@ if (ddlBoundaries.Count > 0)
 }
 
 var records = await FnDblogReader.ReadClusteredRecordsAsync(connection, tableName);
-Console.WriteLine($"{records.Count} log record(s) for {tableName}:");
+var history = RowHistoryReconstructor.Reconstruct(records, schema, ddlBoundaryLsns);
+Console.WriteLine($"{history.Count} row event(s) for {tableName}:");
 Console.WriteLine();
 
-foreach (var record in records)
+foreach (var e in history)
 {
-    switch (record.Operation)
+    string label = e.Kind switch
     {
-        case "LOP_INSERT_ROWS" when record.RowLogContents0 is { Length: > 0 } bytes:
-            PrintRow(record.Lsn, "INSERT", bytes, schema, ddlBoundaryLsns);
-            break;
+        RowEventKind.Insert => "INSERT",
+        RowEventKind.Delete => "DELETE",
+        RowEventKind.Update => "UPDATE",
+        _ => e.Kind.ToString(),
+    };
 
-        case "LOP_DELETE_ROWS" when record.RowLogContents0 is { Length: > 0 } bytes:
-            PrintRow(record.Lsn, "DELETE", bytes, schema, ddlBoundaryLsns);
-            break;
-
-        case "LOP_MODIFY_ROW" or "LOP_MODIFY_COLUMNS":
-            // Reconstructing before/after here needs the splice algorithm
-            // (研究紀錄 第八節) against a known prior row image - not wired
-            // up yet. Report that an update happened without guessing at values.
-            Console.WriteLine($"[{record.Lsn}] UPDATE at offset {record.OffsetInRow} (before/after reconstruction not implemented yet)");
-            break;
+    if (e.Before is null && e.After is null)
+    {
+        Console.WriteLine($"[{e.Lsn}] {label}: not shown - {e.Note}");
+        continue;
     }
+
+    string beforeText = e.Before is null ? "(none)" : Format(e.Before);
+    string afterText = e.After is null ? "(none)" : Format(e.After);
+
+    Console.WriteLine(e.Kind == RowEventKind.Update
+        ? $"[{e.Lsn}] {label}: {beforeText} -> {afterText}"
+        : $"[{e.Lsn}] {label}: {(e.Kind == RowEventKind.Insert ? afterText : beforeText)}");
+
+    if (e.Note is not null)
+        Console.WriteLine($"    ({e.Note})");
 }
 
 return 0;
 
-static void PrintRow(string lsn, string label, byte[] rowBytes, IReadOnlyList<ColumnSchema> schema, IReadOnlyList<string> ddlBoundaryLsns)
-{
-    try
-    {
-        var decoded = RowDecoder.Decode(rowBytes, schema, lsn, ddlBoundaryLsns);
-        var fields = string.Join(", ", decoded.Select(kv => $"{kv.Key}={kv.Value ?? "NULL"}"));
-        Console.WriteLine($"[{lsn}] {label}: {fields}");
-    }
-    catch (SchemaDriftException ex)
-    {
-        Console.WriteLine($"[{lsn}] {label}: REFUSED - {ex.Message}");
-    }
-    catch (NotSupportedException ex)
-    {
-        Console.WriteLine($"[{lsn}] {label}: could not decode - {ex.Message}");
-    }
-}
+static string Format(IReadOnlyDictionary<string, object?> row) =>
+    string.Join(", ", row.Select(kv => $"{kv.Key}={kv.Value ?? "NULL"}"));
