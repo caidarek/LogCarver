@@ -20,7 +20,7 @@ public static class FnDblogReader
     private const string Sql = """
         SELECT [Current LSN] AS Lsn, [Operation] AS Operation, [Context] AS Context,
                [Offset in Row] AS OffsetInRow, [AllocUnitName] AS AllocUnitName,
-               [Page ID] AS PageId, [Slot ID] AS SlotId,
+               [Page ID] AS PageId, [Slot ID] AS SlotId, [Transaction ID] AS TransactionId,
                [RowLog Contents 0] AS Rlc0, [RowLog Contents 1] AS Rlc1
         FROM fn_dblog(NULL, NULL)
         WHERE [AllocUnitName] LIKE @allocPattern
@@ -50,6 +50,7 @@ public static class FnDblogReader
         int ordAlloc = reader.GetOrdinal("AllocUnitName");
         int ordPage = reader.GetOrdinal("PageId");
         int ordSlot = reader.GetOrdinal("SlotId");
+        int ordTxId = reader.GetOrdinal("TransactionId");
         int ordRlc0 = reader.GetOrdinal("Rlc0");
         int ordRlc1 = reader.GetOrdinal("Rlc1");
 
@@ -63,6 +64,7 @@ public static class FnDblogReader
                 AllocUnitName: reader.IsDBNull(ordAlloc) ? null : reader.GetString(ordAlloc),
                 PageId: reader.IsDBNull(ordPage) ? null : reader.GetString(ordPage),
                 SlotId: reader.IsDBNull(ordSlot) ? null : reader.GetInt32(ordSlot),
+                TransactionId: reader.IsDBNull(ordTxId) ? null : reader.GetString(ordTxId),
                 RowLogContents0: reader.IsDBNull(ordRlc0) ? null : (byte[])reader[ordRlc0],
                 RowLogContents1: reader.IsDBNull(ordRlc1) ? null : (byte[])reader[ordRlc1]));
         }

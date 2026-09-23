@@ -7,7 +7,8 @@ public sealed record RowEvent(
     RowEventKind Kind,
     IReadOnlyDictionary<string, object?>? Before,
     IReadOnlyDictionary<string, object?>? After,
-    string? Note);
+    string? Note,
+    DateTime? Timestamp);
 
 /// <summary>
 /// Walks a table's log records in LSN order and reconstructs each
@@ -29,9 +30,15 @@ public static class RowHistoryReconstructor
     public static IReadOnlyList<RowEvent> Reconstruct(
         IEnumerable<LogRecord> recordsInLsnOrder,
         IReadOnlyList<ColumnSchema> schema,
-        IReadOnlyList<string> ddlBoundaryLsns)
+        IReadOnlyList<string> ddlBoundaryLsns,
+        IReadOnlyDictionary<string, DateTime>? transactionBeginTimes = null)
     {
         var events = new List<RowEvent>();
+
+        DateTime? TimestampOf(LogRecord r) =>
+            r.TransactionId is not null && (transactionBeginTimes?.TryGetValue(r.TransactionId, out var t) ?? false)
+                ? t
+                : null;
 
         // Per physical slot: the most recently known row image and the LSN
         // it was actually written at. The write LSN - not the LSN of
@@ -52,7 +59,7 @@ public static class RowHistoryReconstructor
                 case "LOP_INSERT_ROWS" when record.RowLogContents0 is { Length: > 0 } bytes:
                     {
                         var decoded = TryDecode(bytes, schema, record.Lsn, ddlBoundaryLsns, out var note);
-                        events.Add(new RowEvent(record.Lsn, RowEventKind.Insert, null, decoded, note));
+                        events.Add(new RowEvent(record.Lsn, RowEventKind.Insert, null, decoded, note, TimestampOf(record)));
                         state[key] = (bytes, record.Lsn);
                         break;
                     }
@@ -60,7 +67,7 @@ public static class RowHistoryReconstructor
                 case "LOP_DELETE_ROWS" when record.RowLogContents0 is { Length: > 0 } bytes:
                     {
                         var decoded = TryDecode(bytes, schema, record.Lsn, ddlBoundaryLsns, out var note);
-                        events.Add(new RowEvent(record.Lsn, RowEventKind.Delete, decoded, null, note));
+                        events.Add(new RowEvent(record.Lsn, RowEventKind.Delete, decoded, null, note, TimestampOf(record)));
                         state.Remove(key);
                         break;
                     }
@@ -72,14 +79,14 @@ public static class RowHistoryReconstructor
                             record.RowLogContents1 is not { } rlc1)
                         {
                             events.Add(new RowEvent(record.Lsn, RowEventKind.Update, null, null,
-                                "diff not available (missing offset or RowLog Contents)"));
+                                "diff not available (missing offset or RowLog Contents)", TimestampOf(record)));
                             break;
                         }
 
                         if (!state.TryGetValue(key, out var before))
                         {
                             events.Add(new RowEvent(record.Lsn, RowEventKind.Update, null, null,
-                                "before image unknown - this row's insert (or a prior update) is outside the observed log window"));
+                                "before image unknown - this row's insert (or a prior update) is outside the observed log window", TimestampOf(record)));
                             break;
                         }
 
@@ -91,13 +98,13 @@ public static class RowHistoryReconstructor
                         catch (Exception ex) when (ex is ArgumentOutOfRangeException or IndexOutOfRangeException)
                         {
                             events.Add(new RowEvent(record.Lsn, RowEventKind.Update, null, null,
-                                $"patch failed - before image and this diff do not line up ({ex.Message})"));
+                                $"patch failed - before image and this diff do not line up ({ex.Message})", TimestampOf(record)));
                             break;
                         }
 
                         var beforeDecoded = TryDecode(before.Bytes, schema, before.WrittenAtLsn, ddlBoundaryLsns, out var beforeNote);
                         var afterDecoded = TryDecode(afterBytes, schema, record.Lsn, ddlBoundaryLsns, out var afterNote);
-                        events.Add(new RowEvent(record.Lsn, RowEventKind.Update, beforeDecoded, afterDecoded, beforeNote ?? afterNote));
+                        events.Add(new RowEvent(record.Lsn, RowEventKind.Update, beforeDecoded, afterDecoded, beforeNote ?? afterNote, TimestampOf(record)));
                         state[key] = (afterBytes, record.Lsn);
                         break;
                     }

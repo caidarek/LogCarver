@@ -9,5 +9,6 @@ public sealed record LogRecord(
     string? AllocUnitName,
     string? PageId,
     int? SlotId,
+    string? TransactionId,
     byte[]? RowLogContents0,
     byte[]? RowLogContents1);

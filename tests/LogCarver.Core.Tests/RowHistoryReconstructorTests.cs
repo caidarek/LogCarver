@@ -23,13 +23,13 @@ public class RowHistoryReconstructorTests
     private static readonly byte[] Rlc1 = Convert.FromHexString("2923"); // Amount 9001
 
     private static LogRecord Insert(string lsn, string pageId, int slotId, byte[] bytes) =>
-        new(lsn, "LOP_INSERT_ROWS", "LCX_CLUSTERED", null, "dbo.LogTest.pk", pageId, slotId, bytes, null);
+        new(lsn, "LOP_INSERT_ROWS", "LCX_CLUSTERED", null, "dbo.LogTest.pk", pageId, slotId, null, bytes, null);
 
     private static LogRecord Delete(string lsn, string pageId, int slotId, byte[] bytes) =>
-        new(lsn, "LOP_DELETE_ROWS", "LCX_MARK_AS_GHOST", null, "dbo.LogTest.pk", pageId, slotId, bytes, null);
+        new(lsn, "LOP_DELETE_ROWS", "LCX_MARK_AS_GHOST", null, "dbo.LogTest.pk", pageId, slotId, null, bytes, null);
 
     private static LogRecord Update(string lsn, string pageId, int slotId, int offset, byte[] rlc0, byte[] rlc1) =>
-        new(lsn, "LOP_MODIFY_ROW", "LCX_CLUSTERED", offset, "dbo.LogTest.pk", pageId, slotId, rlc0, rlc1);
+        new(lsn, "LOP_MODIFY_ROW", "LCX_CLUSTERED", offset, "dbo.LogTest.pk", pageId, slotId, null, rlc0, rlc1);
 
     [Fact]
     public void InsertThenUpdate_ReconstructsBeforeAndAfterFromInsertImage()

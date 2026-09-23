@@ -3,14 +3,19 @@ using Microsoft.Data.SqlClient;
 
 if (args.Length < 3)
 {
-    Console.WriteLine("Usage: LogCarver.Cli <server> <database> <schema.table>");
+    Console.WriteLine("Usage: LogCarver.Cli <server> <database> <schema.table> [<from>] [<to>]");
     Console.WriteLine("Example: LogCarver.Cli localhost LPT_FullBak dbo.LogTest");
+    Console.WriteLine("Example: LogCarver.Cli localhost LPT_FullBak dbo.LogTest \"2026-09-23T09:00\" \"2026-09-23T10:00\"");
+    Console.WriteLine("<from>/<to> filter which events are PRINTED to that incident window;");
+    Console.WriteLine("reconstruction still uses the table's full observed history so before/after stay accurate.");
     return 1;
 }
 
 string server = args[0];
 string database = args[1];
 string tableName = args[2];
+DateTime? from = args.Length > 3 ? DateTime.Parse(args[3]) : null;
+DateTime? to = args.Length > 4 ? DateTime.Parse(args[4]) : null;
 
 // TrustServerCertificate=true is a pragmatic default for local/dev SQL Server
 // instances with self-signed certs, matching how the research phase worked
@@ -46,12 +51,27 @@ if (ddlBoundaries.Count > 0)
     Console.WriteLine();
 }
 
+var transactionTimes = await TransactionTimeReader.GetTransactionBeginTimesAsync(connection);
 var records = await FnDblogReader.ReadClusteredRecordsAsync(connection, tableName);
-var history = RowHistoryReconstructor.Reconstruct(records, schema, ddlBoundaryLsns);
-Console.WriteLine($"{history.Count} row event(s) for {tableName}:");
+
+// Reconstruction always runs over the table's FULL observed history, not
+// just the [from,to] window - an UPDATE inside the window still needs its
+// "before" image, which may have been written outside it. The time
+// window only filters what gets printed below.
+var history = RowHistoryReconstructor.Reconstruct(records, schema, ddlBoundaryLsns, transactionTimes);
+
+var toShow = history.Where(e =>
+    (from is null || e.Timestamp is null || e.Timestamp >= from) &&
+    (to is null || e.Timestamp is null || e.Timestamp <= to))
+    .ToList();
+
+if (from is not null || to is not null)
+    Console.WriteLine($"{toShow.Count} of {history.Count} row event(s) for {tableName} fall in [{from}, {to}] (events with no resolvable timestamp are always shown):");
+else
+    Console.WriteLine($"{toShow.Count} row event(s) for {tableName}:");
 Console.WriteLine();
 
-foreach (var e in history)
+foreach (var e in toShow)
 {
     string label = e.Kind switch
     {
@@ -60,10 +80,11 @@ foreach (var e in history)
         RowEventKind.Update => "UPDATE",
         _ => e.Kind.ToString(),
     };
+    string when = e.Timestamp is { } t ? t.ToString("yyyy-MM-dd HH:mm:ss.fff") : "time unknown";
 
     if (e.Before is null && e.After is null)
     {
-        Console.WriteLine($"[{e.Lsn}] {label}: not shown - {e.Note}");
+        Console.WriteLine($"[{e.Lsn} {when}] {label}: not shown - {e.Note}");
         continue;
     }
 
@@ -71,8 +92,8 @@ foreach (var e in history)
     string afterText = e.After is null ? "(none)" : Format(e.After);
 
     Console.WriteLine(e.Kind == RowEventKind.Update
-        ? $"[{e.Lsn}] {label}: {beforeText} -> {afterText}"
-        : $"[{e.Lsn}] {label}: {(e.Kind == RowEventKind.Insert ? afterText : beforeText)}");
+        ? $"[{e.Lsn} {when}] {label}: {beforeText} -> {afterText}"
+        : $"[{e.Lsn} {when}] {label}: {(e.Kind == RowEventKind.Insert ? afterText : beforeText)}");
 
     if (e.Note is not null)
         Console.WriteLine($"    ({e.Note})");
