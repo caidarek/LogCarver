@@ -106,6 +106,15 @@ static bool TryParseOptions(string[] args, out CliOptions options, out string er
                 options.KeyValue = value[(eq + 1)..];
                 break;
 
+            case "--snapshot":
+                if (!DateTime.TryParse(value, out var asOf))
+                {
+                    error = $"Could not parse --snapshot value '{value}' as a date/time. Try a format like \"2026-09-23T09:00\".";
+                    return false;
+                }
+                options.SnapshotAsOf = asOf;
+                break;
+
             default:
                 error = $"Unknown option '{flag}'.";
                 return false;
@@ -116,12 +125,13 @@ static bool TryParseOptions(string[] args, out CliOptions options, out string er
 
 static void PrintUsage()
 {
-    Console.WriteLine("Usage: LogCarver.Cli <server> <database> <schema.table> [--from <datetime>] [--to <datetime>] [--key <Column>=<Value>] [--undo] [--replay]");
+    Console.WriteLine("Usage: LogCarver.Cli <server> <database> <schema.table> [--from <datetime>] [--to <datetime>] [--key <Column>=<Value>] [--undo] [--replay] [--snapshot <datetime>]");
     Console.WriteLine("Example: LogCarver.Cli localhost LPT_FullBak dbo.LogTest");
     Console.WriteLine("Example: LogCarver.Cli localhost LPT_FullBak dbo.LogTest --from \"2026-09-23T09:00\" --to \"2026-09-23T10:00\"");
     Console.WriteLine("Example: LogCarver.Cli localhost LPT_FullBak dbo.LogTest --key Id=5   (only this row's full history, 單筆資料歷史)");
     Console.WriteLine("Example: LogCarver.Cli localhost LPT_FullBak dbo.LogTest --key Id=5 --undo   (suggest SQL to reverse each event)");
     Console.WriteLine("Example: LogCarver.Cli localhost LPT_FullBak dbo.LogTest --replay   (suggest forward SQL reproducing each event, 日誌回放)");
+    Console.WriteLine("Example: LogCarver.Cli localhost LPT_FullBak dbo.LogTest --snapshot \"2026-09-23T09:30\"   (reconstruct table state at that moment, 快照)");
     Console.WriteLine();
     Console.WriteLine("--from/--to filter which events are PRINTED to that incident window;");
     Console.WriteLine("reconstruction still uses the table's full observed history so before/after stay accurate.");
@@ -131,6 +141,8 @@ static void PrintUsage()
     Console.WriteLine("Their WHERE clauses match every observed column, not just a primary key, so they become a");
     Console.WriteLine("safe no-op if the row changed again since LogCarver saw it. Review before running - LogCarver");
     Console.WriteLine("never executes anything itself.");
+    Console.WriteLine("--snapshot reconstructs what every row looked like at that exact moment, instead of listing");
+    Console.WriteLine("events. It ignores --from/--to/--key/--undo/--replay.");
     Console.WriteLine();
     Console.WriteLine("Connects with the current Windows account (integrated security). No data ever leaves this machine.");
 }
@@ -189,6 +201,29 @@ static async Task<int> RunAsync(string server, string database, string tableName
     // which may have been written outside it. Filtering only affects what
     // gets printed below.
     var history = RowHistoryReconstructor.Reconstruct(records, schema, ddlBoundaryLsns, transactionTimes);
+
+    if (options.SnapshotAsOf is { } asOf)
+    {
+        var snapshot = SnapshotBuilder.BuildSnapshot(history, asOf);
+        Console.WriteLine($"{snapshot.Rows.Count} row(s) in {tableName} as of {asOf:yyyy-MM-dd HH:mm:ss.fff}:");
+        if (snapshot.EventsWithUnresolvedTimestampIgnored > 0)
+            Console.WriteLine(
+                $"Note: {snapshot.EventsWithUnresolvedTimestampIgnored} event(s) with no resolvable timestamp were ignored " +
+                "and could not be placed in time - the snapshot may be missing their effect.");
+        Console.WriteLine();
+
+        foreach (var row in snapshot.Rows)
+        {
+            if (row.Values is null)
+            {
+                Console.WriteLine($"[{row.PageId}:{row.SlotId}] not shown - {row.Note}");
+                continue;
+            }
+            Console.WriteLine($"[{row.PageId}:{row.SlotId}] {Format(row.Values)}");
+        }
+
+        return 0;
+    }
 
     var toShow = history.Where(e =>
         (options.From is null || e.Timestamp is null || e.Timestamp >= options.From) &&
@@ -267,4 +302,5 @@ sealed class CliOptions
     public string? KeyValue { get; set; }
     public bool ShowUndoSql { get; set; }
     public bool ShowReplaySql { get; set; }
+    public DateTime? SnapshotAsOf { get; set; }
 }

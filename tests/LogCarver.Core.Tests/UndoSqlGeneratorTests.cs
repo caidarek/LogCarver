@@ -8,10 +8,14 @@ public class UndoSqlGeneratorTests
     private static IReadOnlyDictionary<string, object?> Row(int id, string? note, int? amount) =>
         new Dictionary<string, object?> { ["Id"] = id, ["Note"] = note, ["Amount"] = amount };
 
+    private static RowEvent MakeEvent(
+        RowEventKind kind, IReadOnlyDictionary<string, object?>? before, IReadOnlyDictionary<string, object?>? after, string? note = null) =>
+        new("lsn1", kind, before, after, note, null, "0001:0F", 1);
+
     [Fact]
     public void Insert_GeneratesDeleteMatchingTheInsertedRow()
     {
-        var evt = new RowEvent("lsn1", RowEventKind.Insert, null, Row(5, "hello", 100), null, null);
+        var evt = MakeEvent(RowEventKind.Insert, null, Row(5, "hello", 100));
 
         var sql = UndoSqlGenerator.Generate(evt, "dbo.Orders");
 
@@ -21,7 +25,7 @@ public class UndoSqlGeneratorTests
     [Fact]
     public void Delete_GeneratesInsertOfTheDeletedRow()
     {
-        var evt = new RowEvent("lsn1", RowEventKind.Delete, Row(5, "hello", 100), null, null, null);
+        var evt = MakeEvent(RowEventKind.Delete, Row(5, "hello", 100), null);
 
         var sql = UndoSqlGenerator.Generate(evt, "dbo.Orders");
 
@@ -31,7 +35,7 @@ public class UndoSqlGeneratorTests
     [Fact]
     public void Update_SetsBeforeValues_MatchesOnAfterValues()
     {
-        var evt = new RowEvent("lsn1", RowEventKind.Update, Row(5, "old", 100), Row(5, "new", 200), null, null);
+        var evt = MakeEvent(RowEventKind.Update, Row(5, "old", 100), Row(5, "new", 200));
 
         var sql = UndoSqlGenerator.Generate(evt, "dbo.Orders");
 
@@ -43,7 +47,7 @@ public class UndoSqlGeneratorTests
     [Fact]
     public void NullValues_UseIsNullInWhereAndNullLiteralInSetOrValues()
     {
-        var evt = new RowEvent("lsn1", RowEventKind.Update, Row(5, null, 1), Row(5, "was-null", null), null, null);
+        var evt = MakeEvent(RowEventKind.Update, Row(5, null, 1), Row(5, "was-null", null));
 
         var sql = UndoSqlGenerator.Generate(evt, "dbo.Orders");
 
@@ -54,7 +58,7 @@ public class UndoSqlGeneratorTests
     [Fact]
     public void StringWithEmbeddedSingleQuote_IsEscapedByDoubling()
     {
-        var evt = new RowEvent("lsn1", RowEventKind.Delete, Row(5, "O'Brien", 1), null, null, null);
+        var evt = MakeEvent(RowEventKind.Delete, Row(5, "O'Brien", 1), null);
 
         var sql = UndoSqlGenerator.Generate(evt, "dbo.Orders");
 
@@ -64,7 +68,7 @@ public class UndoSqlGeneratorTests
     [Fact]
     public void RefusedEvent_NoImagesAvailable_ReturnsNullInsteadOfThrowing()
     {
-        var evt = new RowEvent("lsn1", RowEventKind.Update, null, null, "refused", null);
+        var evt = MakeEvent(RowEventKind.Update, null, null, "refused");
 
         Assert.Null(UndoSqlGenerator.Generate(evt, "dbo.Orders"));
     }
