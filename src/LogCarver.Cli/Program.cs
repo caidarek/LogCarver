@@ -48,15 +48,25 @@ static bool TryParseOptions(string[] args, out CliOptions options, out string er
     options = new CliOptions();
     error = "";
 
-    for (int i = 3; i < args.Length; i += 2)
+    int i = 3;
+    while (i < args.Length)
     {
         string flag = args[i];
+
+        if (flag == "--undo")
+        {
+            options.ShowUndoSql = true;
+            i += 1;
+            continue;
+        }
+
         if (i + 1 >= args.Length)
         {
             error = $"Missing value for '{flag}'.";
             return false;
         }
         string value = args[i + 1];
+        i += 2;
 
         switch (flag)
         {
@@ -99,15 +109,19 @@ static bool TryParseOptions(string[] args, out CliOptions options, out string er
 
 static void PrintUsage()
 {
-    Console.WriteLine("Usage: LogCarver.Cli <server> <database> <schema.table> [--from <datetime>] [--to <datetime>] [--key <Column>=<Value>]");
+    Console.WriteLine("Usage: LogCarver.Cli <server> <database> <schema.table> [--from <datetime>] [--to <datetime>] [--key <Column>=<Value>] [--undo]");
     Console.WriteLine("Example: LogCarver.Cli localhost LPT_FullBak dbo.LogTest");
     Console.WriteLine("Example: LogCarver.Cli localhost LPT_FullBak dbo.LogTest --from \"2026-09-23T09:00\" --to \"2026-09-23T10:00\"");
     Console.WriteLine("Example: LogCarver.Cli localhost LPT_FullBak dbo.LogTest --key Id=5   (only this row's full history, 單筆資料歷史)");
+    Console.WriteLine("Example: LogCarver.Cli localhost LPT_FullBak dbo.LogTest --key Id=5 --undo   (suggest SQL to reverse each event)");
     Console.WriteLine();
     Console.WriteLine("--from/--to filter which events are PRINTED to that incident window;");
     Console.WriteLine("reconstruction still uses the table's full observed history so before/after stay accurate.");
     Console.WriteLine("--key matches against either the before or after image of each event, so a row is found");
     Console.WriteLine("whether the column changed in that event or not.");
+    Console.WriteLine("--undo prints a suggested SQL statement reversing each shown event. Its WHERE clause matches");
+    Console.WriteLine("every observed column, not just a primary key, so it becomes a safe no-op if the row changed");
+    Console.WriteLine("again since LogCarver saw it. Review before running - LogCarver never executes anything itself.");
     Console.WriteLine();
     Console.WriteLine("Connects with the current Windows account (integrated security). No data ever leaves this machine.");
 }
@@ -214,6 +228,13 @@ static async Task<int> RunAsync(string server, string database, string tableName
 
         if (e.Note is not null)
             Console.WriteLine($"    ({e.Note})");
+
+        if (options.ShowUndoSql)
+        {
+            var undoSql = UndoSqlGenerator.Generate(e, tableName);
+            if (undoSql is not null)
+                Console.WriteLine($"    UNDO: {undoSql}");
+        }
     }
 
     return 0;
@@ -228,4 +249,5 @@ sealed class CliOptions
     public DateTime? To { get; set; }
     public string? KeyColumn { get; set; }
     public string? KeyValue { get; set; }
+    public bool ShowUndoSql { get; set; }
 }
