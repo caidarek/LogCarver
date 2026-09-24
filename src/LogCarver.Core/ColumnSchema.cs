@@ -20,9 +20,7 @@ namespace LogCarver.Core;
 /// <param name="MaxLength">Declared max length in bytes.</param>
 /// <param name="SystemTypeId">
 /// sys.types.system_type_id. Only 56 (int), 42 (datetime2), 167 (varchar),
-/// 231 (nvarchar) are currently decoded. nchar/char are fixed-length
-/// in-row (not through the variable-length path nvarchar/varchar use)
-/// and aren't implemented yet.
+/// 231 (nvarchar), 175 (char), 239 (nchar) are currently decoded.
 /// </param>
 public sealed record ColumnSchema(
     string Name,

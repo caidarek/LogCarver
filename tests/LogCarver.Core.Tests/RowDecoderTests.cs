@@ -37,6 +37,14 @@ public class RowDecoderTests
         new ColumnSchema("Name", 2, LeafOffset: -1, LeafNullBit: 2, MaxLength: 100, SystemTypeId: 231),
     ];
 
+    // dbo.T2: Id INT, C CHAR(5), NC NCHAR(5)
+    private static readonly IReadOnlyList<ColumnSchema> CharSchema =
+    [
+        new ColumnSchema("Id", 1, LeafOffset: 4, LeafNullBit: 1, MaxLength: 4, SystemTypeId: 56),
+        new ColumnSchema("C", 2, LeafOffset: 8, LeafNullBit: 2, MaxLength: 5, SystemTypeId: 175),
+        new ColumnSchema("NC", 3, LeafOffset: 13, LeafNullBit: 3, MaxLength: 10, SystemTypeId: 239),
+    ];
+
     [Fact]
     public void Decode_RealInsertRow_MatchesGroundTruth()
     {
@@ -115,5 +123,21 @@ public class RowDecoderTests
 
         Assert.Equal(1, result["Id"]);
         Assert.Equal("hi", result["Name"]);
+    }
+
+    [Fact]
+    public void Decode_CharAndNcharColumns_AreFixedLengthAndSpacePadded()
+    {
+        // Real captured row for INSERT INTO dbo.T2 (Id, C, NC) VALUES (1, 'ab', N'xy').
+        // char/nchar are fixed-length in-row (unlike varchar/nvarchar), always
+        // stored padded with spaces out to the declared length - char with
+        // single-byte 0x20, nchar with UTF-16 U+0020.
+        byte[] row = Convert.FromHexString("1000170001000000616220202078007900200020002000030000");
+
+        var result = RowDecoder.Decode(row, CharSchema);
+
+        Assert.Equal(1, result["Id"]);
+        Assert.Equal("ab   ", result["C"]);
+        Assert.Equal("xy   ", result["NC"]);
     }
 }

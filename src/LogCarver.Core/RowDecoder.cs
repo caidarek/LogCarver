@@ -35,7 +35,9 @@ public static class RowDecoder
 {
     private const int TypeInt = 56;
     private const int TypeDateTime2 = 42;
+    private const int TypeChar = 175;
     private const int TypeNVarChar = 231;
+    private const int TypeNChar = 239;
 
     /// <summary>
     /// Decodes a row, first refusing (via <see cref="SchemaDriftException"/>)
@@ -94,6 +96,12 @@ public static class RowDecoder
             {
                 TypeInt => BitConverter.ToInt32(row.Slice(col.LeafOffset, 4)),
                 TypeDateTime2 => DecodeDateTime2(row, col.LeafOffset, col.MaxLength),
+                // char/nchar are fixed-length in-row, always stored padded
+                // with spaces (0x20 / U+0020) out to the declared length -
+                // decoded as-is, without trimming, to match what a live
+                // SELECT of the column actually returns.
+                TypeChar => Windows1252GetString(row.Slice(col.LeafOffset, col.MaxLength)),
+                TypeNChar => Encoding.Unicode.GetString(row.Slice(col.LeafOffset, col.MaxLength)),
                 _ => throw new NotSupportedException(
                     $"Column '{col.Name}': system_type_id {col.SystemTypeId} is not implemented yet."),
             };
