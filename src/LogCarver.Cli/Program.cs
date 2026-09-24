@@ -19,12 +19,17 @@ string server = args[0];
 string database = args[1];
 string tableName = args[2];
 
-if (!TryParseOptionalDate(args, 3, "<from>", out var from)) return 1;
-if (!TryParseOptionalDate(args, 4, "<to>", out var to)) return 1;
+if (!TryParseOptions(args, out var options, out var parseError))
+{
+    Console.WriteLine(parseError);
+    Console.WriteLine();
+    PrintUsage();
+    return 1;
+}
 
 try
 {
-    return await RunAsync(server, database, tableName, from, to);
+    return await RunAsync(server, database, tableName, options);
 }
 catch (SqlException ex)
 {
@@ -38,33 +43,76 @@ catch (Exception ex)
     return 1;
 }
 
-static bool TryParseOptionalDate(string[] args, int index, string argName, out DateTime? result)
+static bool TryParseOptions(string[] args, out CliOptions options, out string error)
 {
-    result = null;
-    if (args.Length <= index) return true;
+    options = new CliOptions();
+    error = "";
 
-    if (!DateTime.TryParse(args[index], out var parsed))
+    for (int i = 3; i < args.Length; i += 2)
     {
-        Console.WriteLine($"Could not parse {argName} value '{args[index]}' as a date/time. Try a format like \"2026-09-23T09:00\".");
-        return false;
+        string flag = args[i];
+        if (i + 1 >= args.Length)
+        {
+            error = $"Missing value for '{flag}'.";
+            return false;
+        }
+        string value = args[i + 1];
+
+        switch (flag)
+        {
+            case "--from":
+                if (!DateTime.TryParse(value, out var from))
+                {
+                    error = $"Could not parse --from value '{value}' as a date/time. Try a format like \"2026-09-23T09:00\".";
+                    return false;
+                }
+                options.From = from;
+                break;
+
+            case "--to":
+                if (!DateTime.TryParse(value, out var to))
+                {
+                    error = $"Could not parse --to value '{value}' as a date/time. Try a format like \"2026-09-23T09:00\".";
+                    return false;
+                }
+                options.To = to;
+                break;
+
+            case "--key":
+                int eq = value.IndexOf('=');
+                if (eq <= 0)
+                {
+                    error = $"Could not parse --key value '{value}'. Expected 'ColumnName=Value', e.g. --key Id=5.";
+                    return false;
+                }
+                options.KeyColumn = value[..eq];
+                options.KeyValue = value[(eq + 1)..];
+                break;
+
+            default:
+                error = $"Unknown option '{flag}'.";
+                return false;
+        }
     }
-    result = parsed;
     return true;
 }
 
 static void PrintUsage()
 {
-    Console.WriteLine("Usage: LogCarver.Cli <server> <database> <schema.table> [<from>] [<to>]");
+    Console.WriteLine("Usage: LogCarver.Cli <server> <database> <schema.table> [--from <datetime>] [--to <datetime>] [--key <Column>=<Value>]");
     Console.WriteLine("Example: LogCarver.Cli localhost LPT_FullBak dbo.LogTest");
-    Console.WriteLine("Example: LogCarver.Cli localhost LPT_FullBak dbo.LogTest \"2026-09-23T09:00\" \"2026-09-23T10:00\"");
+    Console.WriteLine("Example: LogCarver.Cli localhost LPT_FullBak dbo.LogTest --from \"2026-09-23T09:00\" --to \"2026-09-23T10:00\"");
+    Console.WriteLine("Example: LogCarver.Cli localhost LPT_FullBak dbo.LogTest --key Id=5   (only this row's full history, 單筆資料歷史)");
     Console.WriteLine();
-    Console.WriteLine("<from>/<to> filter which events are PRINTED to that incident window;");
+    Console.WriteLine("--from/--to filter which events are PRINTED to that incident window;");
     Console.WriteLine("reconstruction still uses the table's full observed history so before/after stay accurate.");
+    Console.WriteLine("--key matches against either the before or after image of each event, so a row is found");
+    Console.WriteLine("whether the column changed in that event or not.");
     Console.WriteLine();
     Console.WriteLine("Connects with the current Windows account (integrated security). No data ever leaves this machine.");
 }
 
-static async Task<int> RunAsync(string server, string database, string tableName, DateTime? from, DateTime? to)
+static async Task<int> RunAsync(string server, string database, string tableName, CliOptions options)
 {
     // TrustServerCertificate=true is a pragmatic default for local/dev SQL Server
     // instances with self-signed certs, matching how the research phase worked
@@ -113,18 +161,29 @@ static async Task<int> RunAsync(string server, string database, string tableName
     var records = await FnDblogReader.ReadClusteredRecordsAsync(connection, tableName);
 
     // Reconstruction always runs over the table's FULL observed history, not
-    // just the [from,to] window - an UPDATE inside the window still needs its
-    // "before" image, which may have been written outside it. The time
-    // window only filters what gets printed below.
+    // just the [from,to] window or a --key filter - an UPDATE inside the
+    // window (or for the requested row) still needs its "before" image,
+    // which may have been written outside it. Filtering only affects what
+    // gets printed below.
     var history = RowHistoryReconstructor.Reconstruct(records, schema, ddlBoundaryLsns, transactionTimes);
 
     var toShow = history.Where(e =>
-        (from is null || e.Timestamp is null || e.Timestamp >= from) &&
-        (to is null || e.Timestamp is null || e.Timestamp <= to))
+        (options.From is null || e.Timestamp is null || e.Timestamp >= options.From) &&
+        (options.To is null || e.Timestamp is null || e.Timestamp <= options.To) &&
+        (options.KeyColumn is null || RowEventFilter.MatchesKey(e, options.KeyColumn, options.KeyValue!)))
         .ToList();
 
-    if (from is not null || to is not null)
-        Console.WriteLine($"{toShow.Count} of {history.Count} row event(s) for {tableName} fall in [{from}, {to}] (events with no resolvable timestamp are always shown):");
+    if (options.KeyColumn is not null)
+    {
+        Console.WriteLine($"{toShow.Count} row event(s) for {tableName} where {options.KeyColumn}={options.KeyValue}:");
+        int unresolvable = history.Count(e => e.Before is null && e.After is null);
+        if (unresolvable > 0)
+            Console.WriteLine(
+                $"Note: {unresolvable} other event(s) in this table could not be decoded (see refusals above) and were not checked against --key - " +
+                "the row you're looking for may be among them, not necessarily absent.");
+    }
+    else if (options.From is not null || options.To is not null)
+        Console.WriteLine($"{toShow.Count} of {history.Count} row event(s) for {tableName} fall in [{options.From}, {options.To}] (events with no resolvable timestamp are always shown):");
     else
         Console.WriteLine($"{toShow.Count} row event(s) for {tableName}:");
     Console.WriteLine();
@@ -162,3 +221,11 @@ static async Task<int> RunAsync(string server, string database, string tableName
 
 static string Format(IReadOnlyDictionary<string, object?> row) =>
     string.Join(", ", row.Select(kv => $"{kv.Key}={kv.Value ?? "NULL"}"));
+
+sealed class CliOptions
+{
+    public DateTime? From { get; set; }
+    public DateTime? To { get; set; }
+    public string? KeyColumn { get; set; }
+    public string? KeyValue { get; set; }
+}
