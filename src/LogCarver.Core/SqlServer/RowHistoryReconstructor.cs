@@ -74,7 +74,32 @@ public static class RowHistoryReconstructor
                         break;
                     }
 
-                case "LOP_MODIFY_ROW" or "LOP_MODIFY_COLUMNS":
+                // LOP_MODIFY_COLUMNS is NOT a byte-range splice like LOP_MODIFY_ROW -
+                // its RowLogContents0/1 are a column-level change descriptor (observed:
+                // 8 and 4 bytes of small integers, not the row content itself; the new
+                // value appears later in the physical record, outside RowLogContents
+                // entirely - undecoded). SQL Server picks this operation over
+                // LOP_MODIFY_ROW for some UPDATEs (observed: a large length change on
+                // a column not covered by any index). Feeding its RowLogContents into
+                // RowPatcher.Splice - as an earlier version of this method did by
+                // grouping it with LOP_MODIFY_ROW - does not throw; it silently
+                // produces a corrupted row that decodes to plausible-looking garbage
+                // (e.g. a garbage Id and missing columns) with no error signal at all,
+                // exactly what this project treats as the one unacceptable failure
+                // mode. Refusing here, and forgetting this slot's last known image
+                // (it's no longer trustworthy either), is required until this format
+                // is reverse-engineered - do not merge this case back with
+                // LOP_MODIFY_ROW's.
+                case "LOP_MODIFY_COLUMNS":
+                    {
+                        events.Add(new RowEvent(record.Lsn, RowEventKind.Update, null, null,
+                            "diff not available (LOP_MODIFY_COLUMNS is a column-level change format, not a byte-range splice - not decoded)",
+                            TimestampOf(record), record.PageId, record.SlotId.Value));
+                        state.Remove(key);
+                        break;
+                    }
+
+                case "LOP_MODIFY_ROW":
                     {
                         if (record.OffsetInRow is not int offset ||
                             record.RowLogContents0 is not { } rlc0 ||
