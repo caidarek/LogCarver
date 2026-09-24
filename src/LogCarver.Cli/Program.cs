@@ -60,6 +60,13 @@ static bool TryParseOptions(string[] args, out CliOptions options, out string er
             continue;
         }
 
+        if (flag == "--replay")
+        {
+            options.ShowReplaySql = true;
+            i += 1;
+            continue;
+        }
+
         if (i + 1 >= args.Length)
         {
             error = $"Missing value for '{flag}'.";
@@ -109,19 +116,21 @@ static bool TryParseOptions(string[] args, out CliOptions options, out string er
 
 static void PrintUsage()
 {
-    Console.WriteLine("Usage: LogCarver.Cli <server> <database> <schema.table> [--from <datetime>] [--to <datetime>] [--key <Column>=<Value>] [--undo]");
+    Console.WriteLine("Usage: LogCarver.Cli <server> <database> <schema.table> [--from <datetime>] [--to <datetime>] [--key <Column>=<Value>] [--undo] [--replay]");
     Console.WriteLine("Example: LogCarver.Cli localhost LPT_FullBak dbo.LogTest");
     Console.WriteLine("Example: LogCarver.Cli localhost LPT_FullBak dbo.LogTest --from \"2026-09-23T09:00\" --to \"2026-09-23T10:00\"");
     Console.WriteLine("Example: LogCarver.Cli localhost LPT_FullBak dbo.LogTest --key Id=5   (only this row's full history, 單筆資料歷史)");
     Console.WriteLine("Example: LogCarver.Cli localhost LPT_FullBak dbo.LogTest --key Id=5 --undo   (suggest SQL to reverse each event)");
+    Console.WriteLine("Example: LogCarver.Cli localhost LPT_FullBak dbo.LogTest --replay   (suggest forward SQL reproducing each event, 日誌回放)");
     Console.WriteLine();
     Console.WriteLine("--from/--to filter which events are PRINTED to that incident window;");
     Console.WriteLine("reconstruction still uses the table's full observed history so before/after stay accurate.");
     Console.WriteLine("--key matches against either the before or after image of each event, so a row is found");
     Console.WriteLine("whether the column changed in that event or not.");
-    Console.WriteLine("--undo prints a suggested SQL statement reversing each shown event. Its WHERE clause matches");
-    Console.WriteLine("every observed column, not just a primary key, so it becomes a safe no-op if the row changed");
-    Console.WriteLine("again since LogCarver saw it. Review before running - LogCarver never executes anything itself.");
+    Console.WriteLine("--undo/--replay print a suggested SQL statement reversing/reproducing each shown event.");
+    Console.WriteLine("Their WHERE clauses match every observed column, not just a primary key, so they become a");
+    Console.WriteLine("safe no-op if the row changed again since LogCarver saw it. Review before running - LogCarver");
+    Console.WriteLine("never executes anything itself.");
     Console.WriteLine();
     Console.WriteLine("Connects with the current Windows account (integrated security). No data ever leaves this machine.");
 }
@@ -235,6 +244,13 @@ static async Task<int> RunAsync(string server, string database, string tableName
             if (undoSql is not null)
                 Console.WriteLine($"    UNDO: {undoSql}");
         }
+
+        if (options.ShowReplaySql)
+        {
+            var replaySql = ReplaySqlGenerator.Generate(e, tableName);
+            if (replaySql is not null)
+                Console.WriteLine($"    REPLAY: {replaySql}");
+        }
     }
 
     return 0;
@@ -250,4 +266,5 @@ sealed class CliOptions
     public string? KeyColumn { get; set; }
     public string? KeyValue { get; set; }
     public bool ShowUndoSql { get; set; }
+    public bool ShowReplaySql { get; set; }
 }
