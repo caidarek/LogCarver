@@ -30,6 +30,13 @@ public class RowDecoderTests
         new ColumnSchema("ColB", 3, LeafOffset: -2, LeafNullBit: 3, MaxLength: 50, SystemTypeId: 167),
     ];
 
+    // dbo.T: Id INT, Name NVARCHAR(50)
+    private static readonly IReadOnlyList<ColumnSchema> NvarcharSchema =
+    [
+        new ColumnSchema("Id", 1, LeafOffset: 4, LeafNullBit: 1, MaxLength: 4, SystemTypeId: 56),
+        new ColumnSchema("Name", 2, LeafOffset: -1, LeafNullBit: 2, MaxLength: 100, SystemTypeId: 231),
+    ];
+
     [Fact]
     public void Decode_RealInsertRow_MatchesGroundTruth()
     {
@@ -91,5 +98,22 @@ public class RowDecoderTests
         Assert.Equal("hi", result["ColA"]);
         Assert.Equal(string.Empty, result["ColB"]);
         Assert.NotNull(result["ColB"]);
+    }
+
+    [Fact]
+    public void Decode_NvarcharColumn_DecodesAsUtf16_NotWindows1252()
+    {
+        // Real captured row for INSERT INTO dbo.T (Id, Name) VALUES (1, N'hi').
+        // nvarchar is stored in-row as UTF-16LE (2 bytes/char), unlike
+        // varchar's single byte/char - decoding it as Windows-1252 silently
+        // produced "h\0i\0" (each letter followed by a stray control
+        // character) with no error. Caught while verifying the snapshot
+        // feature against a real nvarchar column.
+        byte[] row = Convert.FromHexString("30000800010000000200000100130068006900");
+
+        var result = RowDecoder.Decode(row, NvarcharSchema);
+
+        Assert.Equal(1, result["Id"]);
+        Assert.Equal("hi", result["Name"]);
     }
 }

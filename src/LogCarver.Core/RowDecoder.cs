@@ -35,6 +35,7 @@ public static class RowDecoder
 {
     private const int TypeInt = 56;
     private const int TypeDateTime2 = 42;
+    private const int TypeNVarChar = 231;
 
     /// <summary>
     /// Decodes a row, first refusing (via <see cref="SchemaDriftException"/>)
@@ -136,7 +137,7 @@ public static class RowDecoder
                     result[col.Name] = isNull
                         ? null
                         : len > 0
-                            ? Windows1252GetString(row.Slice(prevEnd, len))
+                            ? DecodeVarCharBytes(row.Slice(prevEnd, len), col.SystemTypeId)
                             : string.Empty; // len==0 and not null = legitimate empty string, not NULL
                 }
                 prevEnd = endOffset;
@@ -200,4 +201,17 @@ public static class RowDecoder
 
     private static string Windows1252GetString(ReadOnlySpan<byte> bytes) =>
         Windows1252Encoding.GetString(bytes);
+
+    /// <summary>
+    /// nvarchar stores UTF-16LE (2 bytes/char) in-row, unlike varchar's
+    /// single-byte encoding. Decoding one as the other silently produces
+    /// plausible-looking garbage (e.g. "first" -> "f i r s t", each letter
+    /// followed by a stray null byte read as a control character) with no
+    /// error - caught via a real nvarchar column while verifying the
+    /// snapshot feature.
+    /// </summary>
+    private static string DecodeVarCharBytes(ReadOnlySpan<byte> bytes, int systemTypeId) =>
+        systemTypeId == TypeNVarChar
+            ? Encoding.Unicode.GetString(bytes)
+            : Windows1252GetString(bytes);
 }
