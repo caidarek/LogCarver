@@ -40,6 +40,15 @@ if (schema.Count == 0)
     return 1;
 }
 
+var compressionTypes = await CompressionChecker.GetCompressionTypesAsync(connection, tableName);
+if (CompressionChecker.IsCompressed(compressionTypes))
+{
+    Console.WriteLine(
+        $"'{tableName}' uses {string.Join("/", compressionTypes.Where(t => t != "NONE"))} compression. " +
+        "Compressed rows use a different physical layout that this tool does not decode yet - refusing rather than guessing.");
+    return 1;
+}
+
 var ddlBoundaries = await DdlBoundaryReader.GetDdlBoundariesAsync(connection, tableName);
 var ddlBoundaryLsns = ddlBoundaries.Select(b => b.Lsn).ToList();
 if (ddlBoundaries.Count > 0)

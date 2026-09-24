@@ -122,7 +122,7 @@ public static class RowHistoryReconstructor
             note = null;
             return RowDecoder.Decode(bytes, schema, lsn, ddlBoundaryLsns);
         }
-        catch (Exception ex) when (ex is SchemaDriftException or NotSupportedException)
+        catch (Exception ex) when (ex is SchemaDriftException or NotSupportedException or UnsupportedRowFormatException)
         {
             note = ex.Message;
             return null;

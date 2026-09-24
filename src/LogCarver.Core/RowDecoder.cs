@@ -58,6 +58,28 @@ public static class RowDecoder
 
     public static IReadOnlyDictionary<string, object?> Decode(ReadOnlySpan<byte> row, IReadOnlyList<ColumnSchema> schema)
     {
+        try
+        {
+            return DecodeCore(row, schema);
+        }
+        catch (Exception ex) when (ex is ArgumentOutOfRangeException or IndexOutOfRangeException)
+        {
+            // The most common real cause: an off-row LOB value. Its in-row
+            // bytes are a pointer structure, not length-prefixed character
+            // data, so treating it as a normal variable-length column
+            // computes a length that runs past the end of the row (研究紀錄
+            // LOB 小節). Could also mean a compressed row reached here
+            // despite the Cli's schema-level compression check. Either way,
+            // this is a known-unsupported row format, not a bug to chase -
+            // surface it as such rather than a raw indexing exception.
+            throw new UnsupportedRowFormatException(
+                "Row bytes don't fit the supported layout - likely an off-row LOB value or a compressed row, neither of which this decoder handles yet.",
+                ex);
+        }
+    }
+
+    private static IReadOnlyDictionary<string, object?> DecodeCore(ReadOnlySpan<byte> row, IReadOnlyList<ColumnSchema> schema)
+    {
         byte tagA = row[0];
         bool hasVarCols = (tagA & 0x20) != 0;
         int fixedEnd = ReadUInt16LE(row, 2);
