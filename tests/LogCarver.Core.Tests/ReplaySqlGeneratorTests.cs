@@ -19,7 +19,7 @@ public class ReplaySqlGeneratorTests
 
         var sql = ReplaySqlGenerator.Generate(evt, "dbo.Orders");
 
-        Assert.Equal("INSERT INTO dbo.Orders (Id, Note, Amount) VALUES (5, N'hello', 100);", sql);
+        Assert.Equal("INSERT INTO [dbo].[Orders] ([Id], [Note], [Amount]) VALUES (5, N'hello', 100);", sql);
     }
 
     [Fact]
@@ -29,7 +29,7 @@ public class ReplaySqlGeneratorTests
 
         var sql = ReplaySqlGenerator.Generate(evt, "dbo.Orders");
 
-        Assert.Equal("DELETE FROM dbo.Orders WHERE Id = 5 AND Note = N'hello' AND Amount = 100;", sql);
+        Assert.Equal("DELETE FROM [dbo].[Orders] WHERE [Id] = 5 AND [Note] = N'hello' AND [Amount] = 100;", sql);
     }
 
     [Fact]
@@ -40,7 +40,7 @@ public class ReplaySqlGeneratorTests
         var sql = ReplaySqlGenerator.Generate(evt, "dbo.Orders");
 
         Assert.Equal(
-            "UPDATE dbo.Orders SET Id = 5, Note = N'new', Amount = 200 WHERE Id = 5 AND Note = N'old' AND Amount = 100;",
+            "UPDATE [dbo].[Orders] SET [Id] = 5, [Note] = N'new', [Amount] = 200 WHERE [Id] = 5 AND [Note] = N'old' AND [Amount] = 100;",
             sql);
     }
 
@@ -63,7 +63,7 @@ public class ReplaySqlGeneratorTests
         var undo = UndoSqlGenerator.Generate(evt, "dbo.Orders");
         var replay = ReplaySqlGenerator.Generate(evt, "dbo.Orders");
 
-        Assert.Equal("UPDATE dbo.Orders SET Id = 5, Note = N'old', Amount = 100 WHERE Id = 5 AND Note = N'new' AND Amount = 200;", undo);
-        Assert.Equal("UPDATE dbo.Orders SET Id = 5, Note = N'new', Amount = 200 WHERE Id = 5 AND Note = N'old' AND Amount = 100;", replay);
+        Assert.Equal("UPDATE [dbo].[Orders] SET [Id] = 5, [Note] = N'old', [Amount] = 100 WHERE [Id] = 5 AND [Note] = N'new' AND [Amount] = 200;", undo);
+        Assert.Equal("UPDATE [dbo].[Orders] SET [Id] = 5, [Note] = N'new', [Amount] = 200 WHERE [Id] = 5 AND [Note] = N'old' AND [Amount] = 100;", replay);
     }
 }

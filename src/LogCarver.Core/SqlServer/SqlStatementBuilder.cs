@@ -10,13 +10,13 @@ internal static class SqlStatementBuilder
 {
     public static string BuildInsert(IReadOnlyDictionary<string, object?> values, string tableName)
     {
-        string columns = string.Join(", ", values.Keys);
+        string columns = string.Join(", ", values.Keys.Select(EscapeIdentifier));
         string literals = string.Join(", ", values.Values.Select(FormatSqlLiteral));
-        return $"INSERT INTO {tableName} ({columns}) VALUES ({literals});";
+        return $"INSERT INTO {EscapeIdentifier(tableName)} ({columns}) VALUES ({literals});";
     }
 
     public static string BuildDelete(IReadOnlyDictionary<string, object?> matchValues, string tableName) =>
-        $"DELETE FROM {tableName} WHERE {BuildWhereClause(matchValues)};";
+        $"DELETE FROM {EscapeIdentifier(tableName)} WHERE {BuildWhereClause(matchValues)};";
 
     /// <param name="setValues">The state to write.</param>
     /// <param name="matchValues">
@@ -29,14 +29,26 @@ internal static class SqlStatementBuilder
     public static string BuildUpdate(
         IReadOnlyDictionary<string, object?> setValues, IReadOnlyDictionary<string, object?> matchValues, string tableName)
     {
-        string setClause = string.Join(", ", setValues.Select(kv => $"{kv.Key} = {FormatSqlLiteral(kv.Value)}"));
-        return $"UPDATE {tableName} SET {setClause} WHERE {BuildWhereClause(matchValues)};";
+        string setClause = string.Join(", ", setValues.Select(kv => $"{EscapeIdentifier(kv.Key)} = {FormatSqlLiteral(kv.Value)}"));
+        return $"UPDATE {EscapeIdentifier(tableName)} SET {setClause} WHERE {BuildWhereClause(matchValues)};";
     }
 
     private static string BuildWhereClause(IReadOnlyDictionary<string, object?> row) =>
         string.Join(" AND ", row.Select(kv => kv.Value is null
-            ? $"{kv.Key} IS NULL"
-            : $"{kv.Key} = {FormatSqlLiteral(kv.Value)}"));
+            ? $"{EscapeIdentifier(kv.Key)} IS NULL"
+            : $"{EscapeIdentifier(kv.Key)} = {FormatSqlLiteral(kv.Value)}"));
+
+    // Bracket-quotes each dot-separated part of an identifier (schema.table
+    // or a bare column name) and doubles up any embedded "]" - the SQL
+    // Server quoted-identifier escaping rule. Column names come from
+    // sys.columns metadata rather than a free-text source, but nothing
+    // stops a table from having one that contains SQL syntax characters,
+    // and this text is meant to be reviewed and run by a human rather than
+    // executed by LogCarver itself - an unescaped identifier would let such
+    // a column name inject extra statements into what looks like a plain
+    // suggestion.
+    private static string EscapeIdentifier(string name) =>
+        string.Join(".", name.Split('.').Select(part => $"[{part.Replace("]", "]]")}]"));
 
     private static string FormatSqlLiteral(object? value) => value switch
     {

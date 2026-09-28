@@ -191,26 +191,9 @@ static void PrintUsage()
 
 static async Task<int> RunAsync(string server, string database, string tableName, CliOptions options)
 {
-    // TrustServerCertificate=true is a pragmatic default for local/dev SQL Server
-    // instances with self-signed certs, matching how the research phase worked
-    // around the same issue (sqlcmd -C). A real deployment should make this configurable.
-    var connectionStringBuilder = new SqlConnectionStringBuilder
-    {
-        DataSource = server,
-        InitialCatalog = database,
-        TrustServerCertificate = true,
-    };
-    if (options.SqlUser is not null)
-    {
-        connectionStringBuilder.UserID = options.SqlUser;
-        connectionStringBuilder.Password = options.SqlPassword;
-    }
-    else
-    {
-        connectionStringBuilder.IntegratedSecurity = true;
-    }
+    var connectionString = SqlConnectionFactory.BuildConnectionString(server, database, options.SqlUser, options.SqlPassword);
 
-    await using var connection = new SqlConnection(connectionStringBuilder.ConnectionString);
+    await using var connection = new SqlConnection(connectionString);
     await connection.OpenAsync();
 
     var versionCheck = await SqlServerVersion.CheckAsync(connection);

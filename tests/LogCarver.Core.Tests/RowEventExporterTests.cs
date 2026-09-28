@@ -63,7 +63,7 @@ public class RowEventExporterTests
 
         Assert.DoesNotContain("UndoSql", withoutSql);
         Assert.Contains("UndoSql,ReplaySql", withSql);
-        Assert.Contains("INSERT INTO dbo.Orders", withSql); // the undo for a DELETE
+        Assert.Contains("INSERT INTO [dbo].[Orders]", withSql); // the undo for a DELETE
     }
 
     [Fact]
@@ -90,7 +90,7 @@ public class RowEventExporterTests
         using var doc = JsonDocument.Parse(json);
         var first = doc.RootElement[0];
 
-        Assert.Contains("INSERT INTO dbo.Orders", first.GetProperty("UndoSql").GetString());
+        Assert.Contains("INSERT INTO [dbo].[Orders]", first.GetProperty("UndoSql").GetString());
         Assert.Equal(JsonValueKind.Null, first.GetProperty("ReplaySql").ValueKind);
     }
 }

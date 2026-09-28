@@ -19,7 +19,7 @@ public class UndoSqlGeneratorTests
 
         var sql = UndoSqlGenerator.Generate(evt, "dbo.Orders");
 
-        Assert.Equal("DELETE FROM dbo.Orders WHERE Id = 5 AND Note = N'hello' AND Amount = 100;", sql);
+        Assert.Equal("DELETE FROM [dbo].[Orders] WHERE [Id] = 5 AND [Note] = N'hello' AND [Amount] = 100;", sql);
     }
 
     [Fact]
@@ -29,7 +29,7 @@ public class UndoSqlGeneratorTests
 
         var sql = UndoSqlGenerator.Generate(evt, "dbo.Orders");
 
-        Assert.Equal("INSERT INTO dbo.Orders (Id, Note, Amount) VALUES (5, N'hello', 100);", sql);
+        Assert.Equal("INSERT INTO [dbo].[Orders] ([Id], [Note], [Amount]) VALUES (5, N'hello', 100);", sql);
     }
 
     [Fact]
@@ -40,7 +40,7 @@ public class UndoSqlGeneratorTests
         var sql = UndoSqlGenerator.Generate(evt, "dbo.Orders");
 
         Assert.Equal(
-            "UPDATE dbo.Orders SET Id = 5, Note = N'old', Amount = 100 WHERE Id = 5 AND Note = N'new' AND Amount = 200;",
+            "UPDATE [dbo].[Orders] SET [Id] = 5, [Note] = N'old', [Amount] = 100 WHERE [Id] = 5 AND [Note] = N'new' AND [Amount] = 200;",
             sql);
     }
 
@@ -51,8 +51,8 @@ public class UndoSqlGeneratorTests
 
         var sql = UndoSqlGenerator.Generate(evt, "dbo.Orders");
 
-        Assert.Contains("Note = NULL", sql); // restoring to NULL in SET
-        Assert.Contains("Amount IS NULL", sql); // matching a NULL current value in WHERE
+        Assert.Contains("[Note] = NULL", sql); // restoring to NULL in SET
+        Assert.Contains("[Amount] IS NULL", sql); // matching a NULL current value in WHERE
     }
 
     [Fact]
@@ -63,6 +63,17 @@ public class UndoSqlGeneratorTests
         var sql = UndoSqlGenerator.Generate(evt, "dbo.Orders");
 
         Assert.Contains("N'O''Brien'", sql);
+    }
+
+    [Fact]
+    public void ColumnNameContainingSqlSyntax_IsBracketEscapedNotInjected()
+    {
+        var row = new Dictionary<string, object?> { ["Id"] = 5, ["Weird]; DROP TABLE X; --"] = "v" };
+        var evt = new RowEvent("lsn1", RowEventKind.Insert, null, row, null, null, "0001:0F", 1);
+
+        var sql = UndoSqlGenerator.Generate(evt, "dbo.Orders");
+
+        Assert.Contains("[Weird]]; DROP TABLE X; --]", sql);
     }
 
     [Fact]
