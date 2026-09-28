@@ -6,7 +6,7 @@ SQL Server 交易記錄檔解析工具 —— 直接從交易記錄檔讀出 ins
 
 ## 下載
 
-到 [Releases 頁面](https://github.com/caidarek/LogCarver/releases/latest) 下載最新的 `LogCarver.exe`(單一檔案、內含執行環境),目標機器不需要另外安裝 .NET。
+到 [Releases 頁面](https://github.com/caiderek/LogCarver/releases/latest) 下載最新的 `LogCarver.exe`(單一檔案、內含執行環境),目標機器不需要另外安裝 .NET。
 
 ## 狀態
 

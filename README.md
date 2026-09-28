@@ -6,7 +6,7 @@ SQL Server transaction log parser — reads insert/update/delete history straigh
 
 ## Download
 
-Grab the latest self-contained `LogCarver.exe` from the [Releases page](https://github.com/caidarek/LogCarver/releases/latest) — no .NET installation required on the target machine.
+Grab the latest self-contained `LogCarver.exe` from the [Releases page](https://github.com/caiderek/LogCarver/releases/latest) — no .NET installation required on the target machine.
 
 ## Status
 
