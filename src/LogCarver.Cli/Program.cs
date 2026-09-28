@@ -125,6 +125,19 @@ static bool TryParseOptions(string[] args, out CliOptions options, out string er
                 options.SqlPassword = value;
                 break;
 
+            case "--export":
+                if (value is not ("csv" or "json"))
+                {
+                    error = $"Could not parse --export value '{value}'. Expected 'csv' or 'json'.";
+                    return false;
+                }
+                options.ExportFormat = value;
+                break;
+
+            case "--output":
+                options.OutputPath = value;
+                break;
+
             default:
                 error = $"Unknown option '{flag}'.";
                 return false;
@@ -136,12 +149,17 @@ static bool TryParseOptions(string[] args, out CliOptions options, out string er
         error = "--user and --password must be used together, or not at all (omit both to use Windows integrated authentication).";
         return false;
     }
+    if (options.OutputPath is not null && options.ExportFormat is null)
+    {
+        error = "--output requires --export csv or --export json.";
+        return false;
+    }
     return true;
 }
 
 static void PrintUsage()
 {
-    Console.WriteLine("Usage: LogCarver.Cli <server> <database> <schema.table> [--from <datetime>] [--to <datetime>] [--key <Column>=<Value>] [--undo] [--replay] [--snapshot <datetime>] [--user <name> --password <pw>]");
+    Console.WriteLine("Usage: LogCarver.Cli <server> <database> <schema.table> [--from <datetime>] [--to <datetime>] [--key <Column>=<Value>] [--undo] [--replay] [--snapshot <datetime>] [--user <name> --password <pw>] [--export csv|json [--output <path>]]");
     Console.WriteLine("Example: LogCarver.Cli localhost MyDatabase dbo.Orders");
     Console.WriteLine("Example: LogCarver.Cli localhost MyDatabase dbo.Orders --from \"2026-09-23T09:00\" --to \"2026-09-23T10:00\"");
     Console.WriteLine("Example: LogCarver.Cli localhost MyDatabase dbo.Orders --key Id=5   (only this row's full history)");
@@ -149,6 +167,7 @@ static void PrintUsage()
     Console.WriteLine("Example: LogCarver.Cli localhost MyDatabase dbo.Orders --replay   (suggest forward SQL reproducing each event)");
     Console.WriteLine("Example: LogCarver.Cli localhost MyDatabase dbo.Orders --snapshot \"2026-09-23T09:30\"   (reconstruct table state at that moment)");
     Console.WriteLine("Example: LogCarver.Cli localhost MyDatabase dbo.Orders --user sa --password \"...\"   (SQL auth instead of Windows account)");
+    Console.WriteLine("Example: LogCarver.Cli localhost MyDatabase dbo.Orders --export csv --output orders.csv");
     Console.WriteLine();
     Console.WriteLine("--from/--to filter which events are PRINTED to that incident window;");
     Console.WriteLine("reconstruction still uses the table's full observed history so before/after stay accurate.");
@@ -163,6 +182,9 @@ static void PrintUsage()
     Console.WriteLine("--user/--password connect with SQL authentication instead of the current Windows account -");
     Console.WriteLine("both or neither must be given. The password is visible in your shell history and this");
     Console.WriteLine("process's command line while it runs; prefer Windows authentication where you can.");
+    Console.WriteLine("--export writes structured csv/json instead of the normal console listing - one column per");
+    Console.WriteLine("observed table column (Before_<Col>/After_<Col>), not a single flattened cell. Applies to");
+    Console.WriteLine("the event listing only, not --snapshot. --output writes to that file instead of stdout.");
     Console.WriteLine();
     Console.WriteLine("No data ever leaves this machine.");
 }
@@ -265,6 +287,24 @@ static async Task<int> RunAsync(string server, string database, string tableName
         (options.KeyColumn is null || RowEventFilter.MatchesKey(e, options.KeyColumn, options.KeyValue!)))
         .ToList();
 
+    if (options.ExportFormat is not null)
+    {
+        string content = options.ExportFormat == "csv"
+            ? RowEventExporter.ToCsv(toShow, schema, tableName, options.ShowUndoSql, options.ShowReplaySql)
+            : RowEventExporter.ToJson(toShow, tableName, options.ShowUndoSql, options.ShowReplaySql);
+
+        if (options.OutputPath is not null)
+        {
+            await File.WriteAllTextAsync(options.OutputPath, content);
+            Console.WriteLine($"Wrote {toShow.Count} row event(s) for {tableName} to {options.OutputPath}.");
+        }
+        else
+        {
+            Console.Write(content);
+        }
+        return 0;
+    }
+
     if (options.KeyColumn is not null)
     {
         Console.WriteLine($"{toShow.Count} row event(s) for {tableName} where {options.KeyColumn}={options.KeyValue}:");
@@ -361,4 +401,6 @@ sealed class CliOptions
     public DateTime? SnapshotAsOf { get; set; }
     public string? SqlUser { get; set; }
     public string? SqlPassword { get; set; }
+    public string? ExportFormat { get; set; }
+    public string? OutputPath { get; set; }
 }
