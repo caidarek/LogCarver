@@ -1,0 +1,78 @@
+# LogCarver
+
+**[English](README.md) | 繁體中文**
+
+SQL Server 交易記錄檔解析工具 —— 直接從交易記錄檔讀出 insert/update/delete 歷程,不需要事先啟用 Audit / CDC / Change Tracking。
+
+## 下載
+
+到 [Releases 頁面](https://github.com/caidarek/LogCarver/releases/latest) 下載最新的 `LogCarver.exe`(單一檔案、內含執行環境),目標機器不需要另外安裝 .NET。
+
+## 狀態
+
+**可用的 MVP。** 連上執行中的 SQL Server 實例,解碼一張表完整的 INSERT / UPDATE(前後值)/ DELETE 歷程,會防範 schema-drift 陷阱(用新的表結構去解舊資料列),支援篩選事故時間窗、單筆資料歷史查詢、Undo / Replay SQL 產生,以及時間點快照。想了解原理可以看 [`docs/原理說明.md`](docs/原理說明.md)。
+
+## 使用前提
+
+- 需要一台 SQL Server,且連線帳號要有 `sysadmin` 或 `db_owner` 等級的權限 —— `fn_dblog` 需要較高權限才能查詢。
+- **目前只驗證過 SQL Server 2025。** 偵測到未驗證的版本時工具會警告而不是默默解錯,但其他版本的輸出結果請先謹慎對待,等確認過再依賴它。
+- 只支援 Windows 整合式驗證(Integrated Security),目前沒有帳號密碼登入的選項。
+
+## 目前範圍
+
+- 只支援 SQL Server,透過 `fn_dblog` 連線到執行中的實例
+- 完全在本機執行 —— 不會對外連線,資料不會離開執行這個工具的機器
+- **目前能解碼的欄位型別:`int`、`datetime2(3)`/`datetime2(4)`、`char`、`nchar`、`varchar`、`nvarchar`。** 其他型別(`decimal`/`numeric`/`money`、`bigint`/`smallint`/`tinyint`、`bit`、`float`/`real`、`date`/`time`、其他精度的 `datetime2`、`uniqueidentifier` 等)會明確拒絕解碼,不會用猜的 —— 這些欄位所在的列會顯示 `not shown - ... is not implemented yet`。更多型別在規劃中;如果你的表有財務相關的 `decimal`/`money` 欄位,今天先不要完全依賴這個工具。
+- 同樣採取「明確偵測並拒絕、而非用猜的」原則:壓縮表(ROW/PAGE)、off-row LOB 欄位、早於某次改表結構(schema-changing DDL)的舊紀錄
+- 尚未實作:離線解析 `.ldf` 檔案 —— 救回 `fn_dblog` 已經看不到、但實體上還沒被覆寫的資料。這是這個工具真正的差異化能力,規劃中會做成付費版,詳見下方[離線救援(即將推出)](#離線救援即將推出)。
+
+## 免責聲明
+
+LogCarver 永遠只會**印出建議的 SQL**(`--undo`/`--replay`)—— 它不會用寫入意圖連線,也不會自己執行任何東西。請務必先審閱產生的 SQL,並在非正式環境測試過再用。本工具不保證解碼結果一定正確,尤其牽涉合規或財務用途時,請自行獨立驗證救回的資料。完整免責聲明見 [LICENSE](LICENSE)(MIT 授權)。
+
+## 使用方式
+
+```
+LogCarver.exe <server> <database> <schema.table> [--from <datetime>] [--to <datetime>] [--key <Column>=<Value>] [--undo] [--replay] [--snapshot <datetime>]
+```
+
+| 旗標 | 效果 |
+|---|---|
+| `--from` / `--to` | 只篩選*印出來*的事件落在這個事故時間窗內。重建過程仍然會用該表完整的觀察歷程,所以就算窗口很窄,前後值還是準確的。 |
+| `--key <Column>=<Value>` | 只顯示某一列的完整歷史。會比對每個事件的前值或後值,所以不管該欄位在那次事件裡有沒有變,都找得到這一列。 |
+| `--undo` | 針對每個顯示的事件,印出一句「還原」用的建議 SQL。`WHERE` 子句會比對所有觀察到的欄位,不只是主鍵,所以如果這列在 LogCarver 看到之後又被改過,這句 SQL 執行起來會是安全的空操作。 |
+| `--replay` | 印出「正向重現」該事件的建議 SQL。跟 `--undo` 一樣有安全的 `WHERE` 子句。 |
+| `--snapshot <datetime>` | 重建那個確切時間點每一列的樣子,而不是列出事件清單。會忽略 `--from`/`--to`/`--key`/`--undo`/`--replay`。 |
+
+範例:
+
+```
+LogCarver.exe localhost MyDatabase dbo.Orders
+LogCarver.exe localhost MyDatabase dbo.Orders --from "2026-09-23T09:00" --to "2026-09-23T10:00"
+LogCarver.exe localhost MyDatabase dbo.Orders --key Id=5 --undo
+LogCarver.exe localhost MyDatabase dbo.Orders --snapshot "2026-09-23T09:30"
+```
+
+## 離線救援(即將推出)
+
+如果 `fn_dblog` 對某張表什麼都查不到,通常代表相關的 VLF 已經被標記為可重用、視窗已經滾過去了 —— 但資料很可能實體上還留在 `.ldf` 檔案裡。**LogCarverOffline** 是建構在同一套解碼引擎上的付費工具,直接讀取 `.ldf` 原始位元組,即使資料庫已經離線或 detach,通常仍能救回這種情況。目前還沒開賣 —— 想在上線時收到通知,可以寄信到 `logcarveroffline@gmail.com`。
+
+## 從原始碼建置
+
+```
+dotnet publish src/LogCarver.Cli -c Release
+```
+
+會在 `src/LogCarver.Cli/bin/Release/net10.0/win-x64/publish/` 產生一個約 81MB、內含執行環境的單一檔案 `LogCarver.exe`,目標機器不需要安裝 .NET(依照 [.NET 10 支援的作業系統清單](https://github.com/dotnet/core/blob/main/release-notes/10.0/supported-os.md),已驗證可在 Windows Server 2012 到 2025、以及 Windows 10/11 上執行)。
+
+## 測試
+
+```
+dotnet test
+```
+
+會同時跑 `LogCarver.Core.Tests`(純解碼邏輯,不需要資料庫)與 `LogCarver.Core.IntegrationTests`(對 `localhost` 的真實 `fn_dblog` 行為做測試;需要本機有 SQL Server,測試會自行建立/刪除自己的沙盒資料庫,全部以 `LogCarver_` 為前綴)。
+
+## 授權
+
+MIT —— 詳見 [LICENSE](LICENSE)。

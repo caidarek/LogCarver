@@ -1,5 +1,7 @@
 # LogCarver
 
+**English | [繁體中文](README.zh-TW.md)**
+
 SQL Server transaction log parser — reads insert/update/delete history straight from the transaction log, without requiring Audit/CDC/Change Tracking to have been enabled beforehand.
 
 ## Download
