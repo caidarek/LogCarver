@@ -55,6 +55,8 @@ LogCarver.exe localhost MyDatabase dbo.Orders --snapshot "2026-09-23T09:30"
 
 ## Why do I see "0 row event(s)"?
 
+**TL;DR: under SIMPLE recovery, VLF reuse can finish within seconds, so the data can vanish from `fn_dblog` almost immediately — that's exactly the situation LogCarverOffline exists to solve.**
+
 If you just changed data and LogCarver reports zero events for that table, this is not a bug — it means SQL Server itself has already stopped reporting that history, even to `SELECT * FROM fn_dblog(NULL, NULL)` run by hand.
 
 `fn_dblog` can only ever show what's in the transaction log's **currently active VLFs** (virtual log files). As soon as SQL Server checkpoints and nothing else needs an old VLF — no open transaction, no pending log backup, no replication — it marks that VLF "reusable" and `fn_dblog` immediately stops reporting *everything* in it, not just the operation you're investigating. Under the **SIMPLE** recovery model this can happen within seconds of a checkpoint, since there's nothing (like a log backup) to delay it. A small, low-traffic database in SIMPLE recovery can cycle its entire log — including the original `INSERT`s that first created a row, not just a later `DELETE` — before you've even finished investigating.
