@@ -15,7 +15,7 @@ Grab the latest self-contained `LogCarver.exe` from the [Releases page](https://
 ## Prerequisites
 
 - SQL Server, with an account that has `sysadmin` or `db_owner`-level rights on the target database — `fn_dblog` requires elevated permissions.
-- **Only SQL Server 2025 and 2019 have been validated so far.** The tool warns rather than silently misdecoding when it detects an unvalidated version, but treat output from other versions with extra caution until they're confirmed.
+- **Only SQL Server 2025, 2019, and 2016 (SP2) have been validated so far.** The tool warns rather than silently misdecoding when it detects an unvalidated version, but treat output from other versions with extra caution until they're confirmed.
 - Windows integrated authentication by default; SQL authentication is available via `--user`/`--password` (see [Usage](#usage) below) for servers that aren't domain-joined or don't support integrated security.
 
 ## Scope (current)
