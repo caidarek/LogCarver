@@ -6,8 +6,8 @@ namespace LogCarver.Core.SqlServer;
 /// Single place that builds SQL Server connection strings, so the
 /// TrustServerCertificate trade-off (see remarks) and the choice between
 /// Windows and SQL authentication aren't each reimplemented - and
-/// potentially gotten wrong or forgotten - at every call site across
-/// LogCarver.Cli, LogCarverOffline.Cli and LogCarverOffline.Web.
+/// potentially gotten wrong or forgotten - at every call site that needs
+/// one, including in projects that depend on LogCarver.Core.
 /// </summary>
 public static class SqlConnectionFactory
 {
