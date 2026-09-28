@@ -1,6 +1,8 @@
 using LogCarver.Core.SqlServer;
 using Microsoft.Data.SqlClient;
 
+const string OfflineWaitlistContact = "logcarveroffline@gmail.com";
+
 if (args.Length == 0 || args[0] is "-h" or "--help" or "-?")
 {
     PrintUsage();
@@ -126,12 +128,12 @@ static bool TryParseOptions(string[] args, out CliOptions options, out string er
 static void PrintUsage()
 {
     Console.WriteLine("Usage: LogCarver.Cli <server> <database> <schema.table> [--from <datetime>] [--to <datetime>] [--key <Column>=<Value>] [--undo] [--replay] [--snapshot <datetime>]");
-    Console.WriteLine("Example: LogCarver.Cli localhost LPT_FullBak dbo.LogTest");
-    Console.WriteLine("Example: LogCarver.Cli localhost LPT_FullBak dbo.LogTest --from \"2026-09-23T09:00\" --to \"2026-09-23T10:00\"");
-    Console.WriteLine("Example: LogCarver.Cli localhost LPT_FullBak dbo.LogTest --key Id=5   (only this row's full history, 單筆資料歷史)");
-    Console.WriteLine("Example: LogCarver.Cli localhost LPT_FullBak dbo.LogTest --key Id=5 --undo   (suggest SQL to reverse each event)");
-    Console.WriteLine("Example: LogCarver.Cli localhost LPT_FullBak dbo.LogTest --replay   (suggest forward SQL reproducing each event, 日誌回放)");
-    Console.WriteLine("Example: LogCarver.Cli localhost LPT_FullBak dbo.LogTest --snapshot \"2026-09-23T09:30\"   (reconstruct table state at that moment, 快照)");
+    Console.WriteLine("Example: LogCarver.Cli localhost MyDatabase dbo.Orders");
+    Console.WriteLine("Example: LogCarver.Cli localhost MyDatabase dbo.Orders --from \"2026-09-23T09:00\" --to \"2026-09-23T10:00\"");
+    Console.WriteLine("Example: LogCarver.Cli localhost MyDatabase dbo.Orders --key Id=5   (only this row's full history)");
+    Console.WriteLine("Example: LogCarver.Cli localhost MyDatabase dbo.Orders --key Id=5 --undo   (suggest SQL to reverse each event)");
+    Console.WriteLine("Example: LogCarver.Cli localhost MyDatabase dbo.Orders --replay   (suggest forward SQL reproducing each event)");
+    Console.WriteLine("Example: LogCarver.Cli localhost MyDatabase dbo.Orders --snapshot \"2026-09-23T09:30\"   (reconstruct table state at that moment)");
     Console.WriteLine();
     Console.WriteLine("--from/--to filter which events are PRINTED to that incident window;");
     Console.WriteLine("reconstruction still uses the table's full observed history so before/after stay accurate.");
@@ -168,7 +170,7 @@ static async Task<int> RunAsync(string server, string database, string tableName
     var schema = await SchemaReader.GetTableSchemaAsync(connection, tableName);
     if (schema.Count == 0)
     {
-        Console.WriteLine($"No schema found for '{tableName}'. Does it exist in {database}? Remember to include the schema, e.g. 'dbo.{tableName}'.");
+        Console.WriteLine($"No schema found for '{tableName}' in {database}. Check that it exists and that you included its schema, e.g. 'dbo.Orders' rather than just 'Orders'.");
         return 1;
     }
 
@@ -244,6 +246,17 @@ static async Task<int> RunAsync(string server, string database, string tableName
         Console.WriteLine($"{toShow.Count} of {history.Count} row event(s) for {tableName} fall in [{options.From}, {options.To}] (events with no resolvable timestamp are always shown):");
     else
         Console.WriteLine($"{toShow.Count} row event(s) for {tableName}:");
+
+    if (history.Count == 0)
+    {
+        Console.WriteLine();
+        Console.WriteLine("fn_dblog found nothing for this table. This usually means the relevant VLF has already");
+        Console.WriteLine("been marked reusable and rotated past - the data may still be physically present in the");
+        Console.WriteLine(".ldf file even though SQL Server itself can no longer report it. LogCarverOffline reads");
+        Console.WriteLine("the raw .ldf bytes directly and can often recover exactly this case. Not yet available -");
+        Console.WriteLine($"email {OfflineWaitlistContact} to be notified when it ships.");
+    }
+
     Console.WriteLine();
 
     foreach (var e in toShow)
@@ -292,7 +305,18 @@ static async Task<int> RunAsync(string server, string database, string tableName
 }
 
 static string Format(IReadOnlyDictionary<string, object?> row) =>
-    string.Join(", ", row.Select(kv => $"{kv.Key}={kv.Value ?? "NULL"}"));
+    string.Join(", ", row.Select(kv => $"{kv.Key}={FormatValue(kv.Value)}"));
+
+// DateTime.ToString() with no format uses CurrentCulture, which garbles
+// through non-UTF8 consoles on non-en-US systems (e.g. zh-TW's 上午/下午
+// AM/PM markers) and isn't copy-paste friendly. Force an invariant,
+// unambiguous format instead.
+static string FormatValue(object? value) => value switch
+{
+    null => "NULL",
+    DateTime dt => dt.ToString("yyyy-MM-dd HH:mm:ss.fff", System.Globalization.CultureInfo.InvariantCulture),
+    _ => value.ToString() ?? "NULL",
+};
 
 sealed class CliOptions
 {
