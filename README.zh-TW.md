@@ -53,6 +53,16 @@ LogCarver.exe localhost MyDatabase dbo.Orders --key Id=5 --undo
 LogCarver.exe localhost MyDatabase dbo.Orders --snapshot "2026-09-23T09:30"
 ```
 
+## 為什麼會看到「0 row event(s)」?
+
+如果你剛改完資料,LogCarver 卻對那張表回報零筆事件,這不是 bug——代表 SQL Server 自己已經不再回報那段歷史了,就連你自己手動下 `SELECT * FROM fn_dblog(NULL, NULL)` 查,也一樣看不到。
+
+`fn_dblog` 永遠只能看到交易記錄檔裡**目前仍在使用中的 VLF**(virtual log file)。只要 SQL Server 做完一次 checkpoint、而且沒有其他東西還需要用到某個舊的 VLF——沒有開著的交易、沒有等待中的記錄檔備份、沒有複寫——它就會把那個 VLF 標記成「可重用」,而 `fn_dblog` 會立刻不再回報裡面**所有**的東西,不只是你正在調查的那個操作。在 **SIMPLE** 復原模式下,這個過程可能在 checkpoint 之後幾秒內就發生,因為沒有像記錄檔備份這種東西會延緩它。一個活動量低、規模小的 SIMPLE 復原模式資料庫,可能在你都還沒調查完之前,就已經把整段記錄檔(包含當初建立這筆資料的 `INSERT`,不只是後來的 `DELETE`)都滾過去了。
+
+具體來說:一個 SIMPLE 復原模式資料庫裡的表被刪掉一筆資料,過沒多久就拿 LogCarver 去查,結果顯示 `0 row event(s)`。這是預期中的行為——工具執行的當下,checkpoint 早就已經把相關的 VLF 標記成可重用,`fn_dblog` 也早就忘記那筆刪除、以及更早之前那筆插入。
+
+重要的細節是:「標記為可重用」跟「已經被實體覆寫」是兩回事。位元組資料很可能原封不動地還躺在 `.ldf` 檔案裡——只是 SQL Server 不再告訴你這件事了。`fn_dblog` 能回報的範圍,跟實際上還能救回來的範圍之間的這個落差,正是下面的 **LogCarverOffline** 要補上的。
+
 ## 離線救援(即將推出)
 
 如果 `fn_dblog` 對某張表什麼都查不到,通常代表相關的 VLF 已經被標記為可重用、視窗已經滾過去了 —— 但資料很可能實體上還留在 `.ldf` 檔案裡。**LogCarverOffline** 是建構在同一套解碼引擎上的付費工具,直接讀取 `.ldf` 原始位元組,即使資料庫已經離線或 detach,通常仍能救回這種情況。目前還沒開賣 —— 想在上線時收到通知,可以寄信到 `logcarveroffline@gmail.com`。

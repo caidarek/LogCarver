@@ -53,6 +53,16 @@ LogCarver.exe localhost MyDatabase dbo.Orders --key Id=5 --undo
 LogCarver.exe localhost MyDatabase dbo.Orders --snapshot "2026-09-23T09:30"
 ```
 
+## Why do I see "0 row event(s)"?
+
+If you just changed data and LogCarver reports zero events for that table, this is not a bug — it means SQL Server itself has already stopped reporting that history, even to `SELECT * FROM fn_dblog(NULL, NULL)` run by hand.
+
+`fn_dblog` can only ever show what's in the transaction log's **currently active VLFs** (virtual log files). As soon as SQL Server checkpoints and nothing else needs an old VLF — no open transaction, no pending log backup, no replication — it marks that VLF "reusable" and `fn_dblog` immediately stops reporting *everything* in it, not just the operation you're investigating. Under the **SIMPLE** recovery model this can happen within seconds of a checkpoint, since there's nothing (like a log backup) to delay it. A small, low-traffic database in SIMPLE recovery can cycle its entire log — including the original `INSERT`s that first created a row, not just a later `DELETE` — before you've even finished investigating.
+
+Concretely: a table in a SIMPLE-recovery database gets a row deleted, then LogCarver is run against it moments later and reports `0 row event(s)`. That's expected — by the time the tool ran, the checkpoint had already marked the relevant VLF reusable, and `fn_dblog` had already forgotten the delete *and* the insert that came before it.
+
+The important nuance: "marked reusable" is not the same as "physically overwritten." The bytes may still be sitting untouched in the `.ldf` file — SQL Server just isn't telling you about them anymore. That gap between what `fn_dblog` reports and what's still physically recoverable is exactly what **LogCarverOffline** (below) is built to close.
+
 ## Offline recovery (coming soon)
 
 If `fn_dblog` reports nothing for a table, that usually means the relevant VLF has already been marked reusable and rotated past — but the data may still be physically present in the `.ldf` file. **LogCarverOffline**, a paid tool built on the same decode engine, reads raw `.ldf` bytes directly and can often recover exactly this case, even after the database has gone offline or been detached. Not available yet — email `logcarveroffline@gmail.com` to be notified when it ships.
