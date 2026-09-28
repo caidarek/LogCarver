@@ -44,6 +44,17 @@ public sealed class SqlServerFixture : IAsyncLifetime
             await master.OpenAsync();
             await DropIfExistsAsync(master);
             await ExecAsync(master, $"CREATE DATABASE [{DatabaseName}];");
+
+            // A freshly created FULL-recovery database behaves like SIMPLE
+            // (auto-truncates the log on checkpoint) until its first full
+            // backup - "pseudo-simple" mode. Without this, a slow test run
+            // can have SQL Server checkpoint and silently wipe out this
+            // fixture's own workload before a later test queries it - found
+            // for real via CLI testing against SQL Server 2019 on
+            // 2026-09-28, not a theoretical concern. Backing up to NUL
+            // performs a real backup (anchoring true FULL behavior) without
+            // writing a file anywhere.
+            await ExecAsync(master, $"BACKUP DATABASE [{DatabaseName}] TO DISK = 'NUL:';");
         }
 
         await using var conn = new SqlConnection(ConnectionString);

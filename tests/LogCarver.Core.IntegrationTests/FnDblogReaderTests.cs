@@ -43,6 +43,111 @@ public class FnDblogReaderTests(SqlServerFixture fixture)
         });
     }
 
+    /// <summary>
+    /// Regression test for the bug found during real CLI testing against
+    /// SQL Server 2019 on 2026-09-28: a heap table (no clustered index)
+    /// uses Context='LCX_HEAP' for INSERT/UPDATE/DELETE alike, which the
+    /// original two-context filter excluded entirely - every heap table
+    /// silently reported 0 events, misread as "fn_dblog rotated past this"
+    /// rather than "this tool never looked at heap tables' rows at all".
+    /// </summary>
+    [Fact]
+    public async Task ReadClusteredRecordsAsync_OnAHeapTable_ReturnsAllThreeOperationTypes()
+    {
+        const string heapTable = "dbo.HeapTestTable";
+        await using var setup = new SqlConnection(fixture.ConnectionString);
+        await setup.OpenAsync();
+        await using (var create = new SqlCommand(
+            $"IF OBJECT_ID('{heapTable}') IS NOT NULL DROP TABLE {heapTable}; " +
+            $"CREATE TABLE {heapTable} (Id INT NOT NULL, Note VARCHAR(200) NULL); " +
+            $"INSERT INTO {heapTable} (Id, Note) VALUES (1, 'heap-row-1'), (2, 'heap-row-2'); " +
+            $"UPDATE {heapTable} SET Note = 'heap-row-1-updated' WHERE Id = 1; " +
+            $"DELETE FROM {heapTable} WHERE Id = 2;", setup))
+        {
+            await create.ExecuteNonQueryAsync();
+        }
+
+        await using var connection = new SqlConnection(fixture.ConnectionString);
+        await connection.OpenAsync();
+        var records = await FnDblogReader.ReadClusteredRecordsAsync(connection, heapTable);
+
+        Assert.Contains(records, r => r.Operation == "LOP_INSERT_ROWS");
+        Assert.Contains(records, r => r.Operation is "LOP_MODIFY_ROW" or "LOP_MODIFY_COLUMNS");
+        Assert.Contains(records, r => r.Operation == "LOP_DELETE_ROWS");
+        Assert.All(records, r => Assert.Equal("LCX_HEAP", r.Context));
+    }
+
+    /// <summary>
+    /// Regression test for the bug found during real CLI testing against
+    /// SQL Server 2019 on 2026-09-28: a heap table WITH a nonclustered
+    /// index (e.g. one backing a PRIMARY KEY NONCLUSTERED) also has its own
+    /// AllocUnitName ("schema.table.indexname") for that index's own
+    /// maintenance activity - which the original AllocUnitName-prefix
+    /// guess for heaps ("schema.table" exact match, no suffix at all) does
+    /// technically avoid pulling in via a LIKE prefix, but which a naive
+    /// broader match easily could. This pins the fixed behavior down
+    /// directly: DELETE must produce exactly one row event on the base
+    /// table, not one on the table plus a spurious one from the index's own
+    /// b-tree entry removal.
+    /// </summary>
+    [Fact]
+    public async Task ReadClusteredRecordsAsync_OnAHeapWithANonclusteredIndex_DoesNotLeakTheIndexsOwnMaintenanceRecords()
+    {
+        const string heapTable = "dbo.HeapWithIndexTestTable";
+        await using var setup = new SqlConnection(fixture.ConnectionString);
+        await setup.OpenAsync();
+        await using (var create = new SqlCommand(
+            $"IF OBJECT_ID('{heapTable}') IS NOT NULL DROP TABLE {heapTable}; " +
+            $"CREATE TABLE {heapTable} (Id INT NOT NULL, Note VARCHAR(200) NULL, " +
+            $"CONSTRAINT PK_HeapWithIndexTestTable PRIMARY KEY NONCLUSTERED (Id)); " +
+            $"INSERT INTO {heapTable} (Id, Note) VALUES (1, 'row-1'), (2, 'row-2'); " +
+            $"DELETE FROM {heapTable} WHERE Id = 2;", setup))
+        {
+            await create.ExecuteNonQueryAsync();
+        }
+
+        await using var connection = new SqlConnection(fixture.ConnectionString);
+        await connection.OpenAsync();
+        var records = await FnDblogReader.ReadClusteredRecordsAsync(connection, heapTable);
+
+        Assert.Equal(2, records.Count(r => r.Operation == "LOP_INSERT_ROWS"));
+        Assert.Equal(1, records.Count(r => r.Operation == "LOP_DELETE_ROWS"));
+        Assert.All(records, r => Assert.Equal($"{heapTable}", r.AllocUnitName));
+    }
+
+    /// <summary>
+    /// Same bug class as the heap-with-index test above, but for a
+    /// clustered table: a secondary nonclustered index's own AllocUnitName
+    /// is "schema.table.indexname", which the original loose
+    /// "schema.table.%" prefix guess also matched (any index name fits
+    /// after the dot) - only never triggered because no earlier test table
+    /// had a second index. Resolving the clustered index's own real name up
+    /// front and matching it exactly closes this for clustered tables too.
+    /// </summary>
+    [Fact]
+    public async Task ReadClusteredRecordsAsync_OnAClusteredTableWithASecondaryIndex_DoesNotLeakTheIndexsOwnMaintenanceRecords()
+    {
+        const string clusteredTable = "dbo.ClusteredWithSecondaryIndexTestTable";
+        await using var setup = new SqlConnection(fixture.ConnectionString);
+        await setup.OpenAsync();
+        await using (var create = new SqlCommand(
+            $"IF OBJECT_ID('{clusteredTable}') IS NOT NULL DROP TABLE {clusteredTable}; " +
+            $"CREATE TABLE {clusteredTable} (Id INT NOT NULL PRIMARY KEY, Note VARCHAR(200) NULL); " +
+            $"CREATE NONCLUSTERED INDEX IX_Note ON {clusteredTable} (Note); " +
+            $"INSERT INTO {clusteredTable} (Id, Note) VALUES (1, 'row-1'), (2, 'row-2'); " +
+            $"DELETE FROM {clusteredTable} WHERE Id = 2;", setup))
+        {
+            await create.ExecuteNonQueryAsync();
+        }
+
+        await using var connection = new SqlConnection(fixture.ConnectionString);
+        await connection.OpenAsync();
+        var records = await FnDblogReader.ReadClusteredRecordsAsync(connection, clusteredTable);
+
+        Assert.Equal(2, records.Count(r => r.Operation == "LOP_INSERT_ROWS"));
+        Assert.Equal(1, records.Count(r => r.Operation == "LOP_DELETE_ROWS"));
+    }
+
     [Fact]
     public async Task ReadClusteredRecordsAsync_DoesNotMatchUnrelatedTableWithSharedPrefix()
     {

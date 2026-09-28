@@ -6,6 +6,15 @@ namespace LogCarver.Core.SqlServer;
 /// Reads a table's physical row layout from sys.system_internals_partition_columns
 /// (undocumented, but this is exactly the metadata RowDecoder needs - see
 /// CLAUDE.md and 研究紀錄 第八節 for why this beats hardcoding a type map).
+///
+/// index_id filter: a table can have more than one row in sys.partitions -
+/// index_id=0/1 for its own heap/clustered-index storage, plus one more
+/// per nonclustered index. Without filtering to 0/1, a heap table with any
+/// nonclustered index (e.g. one backing a NONCLUSTERED PRIMARY KEY) joins
+/// in that index's own internal column layout alongside the heap's real
+/// one, producing bogus SystemTypeId values for columns not covered by the
+/// index - found for real on 2026-09-28 via a heap table with a
+/// PRIMARY KEY NONCLUSTERED constraint (see SchemaReaderTests).
 /// </summary>
 public static class SchemaReader
 {
@@ -16,7 +25,7 @@ public static class SchemaReader
         FROM sys.system_internals_partition_columns ipc
         JOIN sys.partitions p ON p.partition_id = ipc.partition_id
         JOIN sys.columns c ON c.object_id = p.object_id AND c.column_id = ipc.partition_column_id
-        WHERE p.object_id = OBJECT_ID(@tableName)
+        WHERE p.object_id = OBJECT_ID(@tableName) AND p.index_id IN (0, 1)
         ORDER BY c.column_id;
         """;
 

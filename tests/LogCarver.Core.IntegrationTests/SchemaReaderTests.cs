@@ -42,6 +42,40 @@ public class SchemaReaderTests(SqlServerFixture fixture)
         // be decoded using it).
     }
 
+    /// <summary>
+    /// Regression test for the bug found during real CLI testing against
+    /// SQL Server 2019 on 2026-09-28: sys.partitions has one row per index,
+    /// not per table. A heap table with any nonclustered index (here, one
+    /// backing a NONCLUSTERED PRIMARY KEY) has two partition rows -
+    /// index_id=0 for the heap itself, index_id=2 for the index. Without
+    /// filtering to index_id IN (0, 1), the query joined in the index's own
+    /// internal column layout alongside the heap's, producing a bogus
+    /// SystemTypeId for the column not covered by the index.
+    /// </summary>
+    [Fact]
+    public async Task GetTableSchemaAsync_OnAHeapWithANonclusteredIndex_OnlyReadsTheHeapsOwnColumnLayout()
+    {
+        const string heapTable = "dbo.HeapWithNonclusteredPk";
+        await using var setup = new SqlConnection(fixture.ConnectionString);
+        await setup.OpenAsync();
+        await using (var create = new SqlCommand(
+            $"IF OBJECT_ID('{heapTable}') IS NOT NULL DROP TABLE {heapTable}; " +
+            $"CREATE TABLE {heapTable} (Id INT NOT NULL, CustomerName NVARCHAR(100), " +
+            $"CONSTRAINT PK_HeapWithNonclusteredPk PRIMARY KEY NONCLUSTERED (Id));",
+            setup))
+        {
+            await create.ExecuteNonQueryAsync();
+        }
+
+        await using var connection = new SqlConnection(fixture.ConnectionString);
+        await connection.OpenAsync();
+        var schema = await SchemaReader.GetTableSchemaAsync(connection, heapTable);
+
+        Assert.Equal(2, schema.Count);
+        var customerName = schema.Single(c => c.Name == "CustomerName");
+        Assert.Equal(231, customerName.SystemTypeId); // nvarchar, not the nonclustered index's internal layout
+    }
+
     [Fact]
     public async Task GetTableSchemaAsync_UnknownTable_ReturnsEmpty()
     {
