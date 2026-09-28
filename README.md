@@ -16,7 +16,7 @@ Grab the latest self-contained `LogCarver.exe` from the [Releases page](https://
 
 - SQL Server, with an account that has `sysadmin` or `db_owner`-level rights on the target database — `fn_dblog` requires elevated permissions.
 - **Only SQL Server 2025 and 2019 have been validated so far.** The tool warns rather than silently misdecoding when it detects an unvalidated version, but treat output from other versions with extra caution until they're confirmed.
-- Windows integrated authentication only — no username/password option today.
+- Windows integrated authentication by default; SQL authentication is available via `--user`/`--password` (see [Usage](#usage) below) for servers that aren't domain-joined or don't support integrated security.
 
 ## Scope (current)
 
@@ -34,7 +34,7 @@ LogCarver only ever **prints suggested SQL** (for `--undo`/`--replay`) — it ne
 ## Usage
 
 ```
-LogCarver.exe <server> <database> <schema.table> [--from <datetime>] [--to <datetime>] [--key <Column>=<Value>] [--undo] [--replay] [--snapshot <datetime>]
+LogCarver.exe <server> <database> <schema.table> [--from <datetime>] [--to <datetime>] [--key <Column>=<Value>] [--undo] [--replay] [--snapshot <datetime>] [--user <name> --password <pw>]
 ```
 
 | Flag | Effect |
@@ -44,6 +44,7 @@ LogCarver.exe <server> <database> <schema.table> [--from <datetime>] [--to <date
 | `--undo` | Print a suggested SQL statement reversing each shown event. The `WHERE` clause matches every observed column, not just a primary key, so it becomes a safe no-op if the row has changed again since LogCarver saw it. |
 | `--replay` | Print a suggested SQL statement reproducing each shown event forward. Same safe-`WHERE` behavior as `--undo`. |
 | `--snapshot <datetime>` | Reconstruct what every row looked like at that exact moment, instead of listing events. Ignores `--from`/`--to`/`--key`/`--undo`/`--replay`. |
+| `--user <name>` / `--password <pw>` | Connect with SQL authentication instead of the current Windows account. Both or neither must be given. The password is visible in your shell history and this process's command line while it runs — prefer Windows authentication where you can. |
 
 Examples:
 
@@ -52,6 +53,7 @@ LogCarver.exe localhost MyDatabase dbo.Orders
 LogCarver.exe localhost MyDatabase dbo.Orders --from "2026-09-23T09:00" --to "2026-09-23T10:00"
 LogCarver.exe localhost MyDatabase dbo.Orders --key Id=5 --undo
 LogCarver.exe localhost MyDatabase dbo.Orders --snapshot "2026-09-23T09:30"
+LogCarver.exe localhost MyDatabase dbo.Orders --user sa --password "..."
 ```
 
 ## Why do I see "0 row event(s)"?

@@ -16,7 +16,7 @@ SQL Server 交易記錄檔解析工具 —— 直接從交易記錄檔讀出 ins
 
 - 需要一台 SQL Server,且連線帳號要有 `sysadmin` 或 `db_owner` 等級的權限 —— `fn_dblog` 需要較高權限才能查詢。
 - **目前只驗證過 SQL Server 2025 跟 2019。** 偵測到未驗證的版本時工具會警告而不是默默解錯,但其他版本的輸出結果請先謹慎對待,等確認過再依賴它。
-- 只支援 Windows 整合式驗證(Integrated Security),目前沒有帳號密碼登入的選項。
+- 預設用 Windows 整合式驗證(Integrated Security),也可以用 `--user`/`--password` 走 SQL 帳號密碼登入(見下方[使用方式](#使用方式)),適合非網域主機或不支援整合式驗證的伺服器。
 
 ## 目前範圍
 
@@ -34,7 +34,7 @@ LogCarver 永遠只會**印出建議的 SQL**(`--undo`/`--replay`)—— 它不�
 ## 使用方式
 
 ```
-LogCarver.exe <server> <database> <schema.table> [--from <datetime>] [--to <datetime>] [--key <Column>=<Value>] [--undo] [--replay] [--snapshot <datetime>]
+LogCarver.exe <server> <database> <schema.table> [--from <datetime>] [--to <datetime>] [--key <Column>=<Value>] [--undo] [--replay] [--snapshot <datetime>] [--user <name> --password <pw>]
 ```
 
 | 旗標 | 效果 |
@@ -44,6 +44,7 @@ LogCarver.exe <server> <database> <schema.table> [--from <datetime>] [--to <date
 | `--undo` | 針對每個顯示的事件,印出一句「還原」用的建議 SQL。`WHERE` 子句會比對所有觀察到的欄位,不只是主鍵,所以如果這列在 LogCarver 看到之後又被改過,這句 SQL 執行起來會是安全的空操作。 |
 | `--replay` | 印出「正向重現」該事件的建議 SQL。跟 `--undo` 一樣有安全的 `WHERE` 子句。 |
 | `--snapshot <datetime>` | 重建那個確切時間點每一列的樣子,而不是列出事件清單。會忽略 `--from`/`--to`/`--key`/`--undo`/`--replay`。 |
+| `--user <name>` / `--password <pw>` | 改用 SQL 帳號密碼登入,不用目前的 Windows 帳號。兩個要嘛一起給、要嘛都不給。密碼在執行期間會出現在你的 shell 紀錄跟這個行程的命令列裡——能用 Windows 驗證就盡量用。 |
 
 範例:
 
@@ -52,6 +53,7 @@ LogCarver.exe localhost MyDatabase dbo.Orders
 LogCarver.exe localhost MyDatabase dbo.Orders --from "2026-09-23T09:00" --to "2026-09-23T10:00"
 LogCarver.exe localhost MyDatabase dbo.Orders --key Id=5 --undo
 LogCarver.exe localhost MyDatabase dbo.Orders --snapshot "2026-09-23T09:30"
+LogCarver.exe localhost MyDatabase dbo.Orders --user sa --password "..."
 ```
 
 ## 為什麼會看到「0 row event(s)」?

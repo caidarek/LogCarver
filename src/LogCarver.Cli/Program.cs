@@ -36,7 +36,7 @@ try
 catch (SqlException ex)
 {
     Console.WriteLine($"Could not connect to or query SQL Server '{server}': {ex.Message}");
-    Console.WriteLine("Check that the server name is correct, the instance is running and reachable, and your Windows account has access to the database.");
+    Console.WriteLine("Check that the server name is correct, the instance is running and reachable, and your account has access to the database.");
     return 1;
 }
 catch (Exception ex)
@@ -117,23 +117,38 @@ static bool TryParseOptions(string[] args, out CliOptions options, out string er
                 options.SnapshotAsOf = asOf;
                 break;
 
+            case "--user":
+                options.SqlUser = value;
+                break;
+
+            case "--password":
+                options.SqlPassword = value;
+                break;
+
             default:
                 error = $"Unknown option '{flag}'.";
                 return false;
         }
+    }
+
+    if (options.SqlUser is not null != options.SqlPassword is not null)
+    {
+        error = "--user and --password must be used together, or not at all (omit both to use Windows integrated authentication).";
+        return false;
     }
     return true;
 }
 
 static void PrintUsage()
 {
-    Console.WriteLine("Usage: LogCarver.Cli <server> <database> <schema.table> [--from <datetime>] [--to <datetime>] [--key <Column>=<Value>] [--undo] [--replay] [--snapshot <datetime>]");
+    Console.WriteLine("Usage: LogCarver.Cli <server> <database> <schema.table> [--from <datetime>] [--to <datetime>] [--key <Column>=<Value>] [--undo] [--replay] [--snapshot <datetime>] [--user <name> --password <pw>]");
     Console.WriteLine("Example: LogCarver.Cli localhost MyDatabase dbo.Orders");
     Console.WriteLine("Example: LogCarver.Cli localhost MyDatabase dbo.Orders --from \"2026-09-23T09:00\" --to \"2026-09-23T10:00\"");
     Console.WriteLine("Example: LogCarver.Cli localhost MyDatabase dbo.Orders --key Id=5   (only this row's full history)");
     Console.WriteLine("Example: LogCarver.Cli localhost MyDatabase dbo.Orders --key Id=5 --undo   (suggest SQL to reverse each event)");
     Console.WriteLine("Example: LogCarver.Cli localhost MyDatabase dbo.Orders --replay   (suggest forward SQL reproducing each event)");
     Console.WriteLine("Example: LogCarver.Cli localhost MyDatabase dbo.Orders --snapshot \"2026-09-23T09:30\"   (reconstruct table state at that moment)");
+    Console.WriteLine("Example: LogCarver.Cli localhost MyDatabase dbo.Orders --user sa --password \"...\"   (SQL auth instead of Windows account)");
     Console.WriteLine();
     Console.WriteLine("--from/--to filter which events are PRINTED to that incident window;");
     Console.WriteLine("reconstruction still uses the table's full observed history so before/after stay accurate.");
@@ -145,8 +160,11 @@ static void PrintUsage()
     Console.WriteLine("never executes anything itself.");
     Console.WriteLine("--snapshot reconstructs what every row looked like at that exact moment, instead of listing");
     Console.WriteLine("events. It ignores --from/--to/--key/--undo/--replay.");
+    Console.WriteLine("--user/--password connect with SQL authentication instead of the current Windows account -");
+    Console.WriteLine("both or neither must be given. The password is visible in your shell history and this");
+    Console.WriteLine("process's command line while it runs; prefer Windows authentication where you can.");
     Console.WriteLine();
-    Console.WriteLine("Connects with the current Windows account (integrated security). No data ever leaves this machine.");
+    Console.WriteLine("No data ever leaves this machine.");
 }
 
 static async Task<int> RunAsync(string server, string database, string tableName, CliOptions options)
@@ -154,9 +172,23 @@ static async Task<int> RunAsync(string server, string database, string tableName
     // TrustServerCertificate=true is a pragmatic default for local/dev SQL Server
     // instances with self-signed certs, matching how the research phase worked
     // around the same issue (sqlcmd -C). A real deployment should make this configurable.
-    var connectionString = $"Server={server};Database={database};Integrated Security=true;TrustServerCertificate=true;";
+    var connectionStringBuilder = new SqlConnectionStringBuilder
+    {
+        DataSource = server,
+        InitialCatalog = database,
+        TrustServerCertificate = true,
+    };
+    if (options.SqlUser is not null)
+    {
+        connectionStringBuilder.UserID = options.SqlUser;
+        connectionStringBuilder.Password = options.SqlPassword;
+    }
+    else
+    {
+        connectionStringBuilder.IntegratedSecurity = true;
+    }
 
-    await using var connection = new SqlConnection(connectionString);
+    await using var connection = new SqlConnection(connectionStringBuilder.ConnectionString);
     await connection.OpenAsync();
 
     var versionCheck = await SqlServerVersion.CheckAsync(connection);
@@ -327,4 +359,6 @@ sealed class CliOptions
     public bool ShowUndoSql { get; set; }
     public bool ShowReplaySql { get; set; }
     public DateTime? SnapshotAsOf { get; set; }
+    public string? SqlUser { get; set; }
+    public string? SqlPassword { get; set; }
 }
