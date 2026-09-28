@@ -15,7 +15,7 @@ SQL Server 交易記錄檔解析工具 —— 直接從交易記錄檔讀出 ins
 ## 使用前提
 
 - 需要一台 SQL Server,且連線帳號要有 `sysadmin` 或 `db_owner` 等級的權限 —— `fn_dblog` 需要較高權限才能查詢。
-- **目前只驗證過 SQL Server 2025。** 偵測到未驗證的版本時工具會警告而不是默默解錯,但其他版本的輸出結果請先謹慎對待,等確認過再依賴它。
+- **目前只驗證過 SQL Server 2025 跟 2019。** 偵測到未驗證的版本時工具會警告而不是默默解錯,但其他版本的輸出結果請先謹慎對待,等確認過再依賴它。
 - 只支援 Windows 整合式驗證(Integrated Security),目前沒有帳號密碼登入的選項。
 
 ## 目前範圍
@@ -24,6 +24,7 @@ SQL Server 交易記錄檔解析工具 —— 直接從交易記錄檔讀出 ins
 - 完全在本機執行 —— 不會對外連線,資料不會離開執行這個工具的機器
 - **目前能解碼的欄位型別:`int`、`datetime2(3)`/`datetime2(4)`、`char`、`nchar`、`varchar`、`nvarchar`。** 其他型別(`decimal`/`numeric`/`money`、`bigint`/`smallint`/`tinyint`、`bit`、`float`/`real`、`date`/`time`、其他精度的 `datetime2`、`uniqueidentifier` 等)會明確拒絕解碼,不會用猜的 —— 這些欄位所在的列會顯示 `not shown - ... is not implemented yet`。更多型別在規劃中;如果你的表有財務相關的 `decimal`/`money` 欄位,今天先不要完全依賴這個工具。
 - 同樣採取「明確偵測並拒絕、而非用猜的」原則:壓縮表(ROW/PAGE)、off-row LOB 欄位、早於某次改表結構(schema-changing DDL)的舊紀錄
+- **已知的「過度拒絕」限制,不是解錯資料的風險**:`TRUNCATE TABLE` 產生的 log 紀錄類型(`LOP_HOBT_DDL`)跟真正改變欄位結構的 `ALTER TABLE` 是同一種,目前工具分不出兩者的差別——所以 `TRUNCATE` 會被當成改表結構的邊界,連帶讓它之前所有事件都被拒絕顯示,即使 `TRUNCATE` 根本沒有改變欄位配置。那些被拒絕的歷史紀錄其實是可以正確解碼的,只是這個工具現在還沒把它們秀出來。
 - 尚未實作:離線解析 `.ldf` 檔案 —— 救回 `fn_dblog` 已經看不到、但實體上還沒被覆寫的資料。這是這個工具真正的差異化能力,規劃中會做成付費版,詳見下方[離線救援(即將推出)](#離線救援即將推出)。
 
 ## 免責聲明

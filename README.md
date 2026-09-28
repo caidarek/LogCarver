@@ -15,7 +15,7 @@ Grab the latest self-contained `LogCarver.exe` from the [Releases page](https://
 ## Prerequisites
 
 - SQL Server, with an account that has `sysadmin` or `db_owner`-level rights on the target database — `fn_dblog` requires elevated permissions.
-- **Only SQL Server 2025 has been validated so far.** The tool warns rather than silently misdecoding when it detects an unvalidated version, but treat output from other versions with extra caution until they're confirmed.
+- **Only SQL Server 2025 and 2019 have been validated so far.** The tool warns rather than silently misdecoding when it detects an unvalidated version, but treat output from other versions with extra caution until they're confirmed.
 - Windows integrated authentication only — no username/password option today.
 
 ## Scope (current)
@@ -24,6 +24,7 @@ Grab the latest self-contained `LogCarver.exe` from the [Releases page](https://
 - Runs entirely locally — no network calls, no data ever leaves the machine it runs on
 - **Column types currently decoded: `int`, `datetime2(3)`/`datetime2(4)`, `char`, `nchar`, `varchar`, `nvarchar`.** Any other type (`decimal`/`numeric`/`money`, `bigint`/`smallint`/`tinyint`, `bit`, `float`/`real`, `date`/`time`, `datetime2` at other scales, `uniqueidentifier`, etc.) is explicitly refused, not guessed — you'll see `not shown - ... is not implemented yet` for those rows. More types are on the roadmap; check before relying on this for a table with financial (`decimal`/`money`) columns today.
 - Also explicitly detected and refused rather than guessed at: compressed tables (ROW/PAGE), off-row LOB values, records predating a schema-changing DDL
+- **Known over-refusal, not a wrong-data risk:** `TRUNCATE TABLE` produces the same kind of log record (`LOP_HOBT_DDL`) as a real schema-changing `ALTER TABLE`, and the two aren't currently distinguished — so a `TRUNCATE` gets treated as a schema boundary, and every event before it gets refused too, even though `TRUNCATE` never actually changes column layout. The refused history is real and decodable; this tool just doesn't show it yet.
 - Not yet implemented: offline `.ldf` file analysis — recovering data `fn_dblog` can no longer see but that hasn't been physically overwritten yet. This is the tool's core differentiator and is planned as a paid tier; see [Offline recovery](#offline-recovery-coming-soon) below.
 
 ## Disclaimer

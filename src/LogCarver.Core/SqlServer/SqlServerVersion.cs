@@ -12,7 +12,7 @@ namespace LogCarver.Core.SqlServer;
 public static class SqlServerVersion
 {
     /// <summary>Major.Minor product versions this decoder has actually been run against.</summary>
-    public static readonly IReadOnlyList<string> ValidatedVersions = ["17.0"]; // SQL Server 2025
+    public static readonly IReadOnlyList<string> ValidatedVersions = ["17.0", "15.0"]; // SQL Server 2025, 2019
 
     public static async Task<VersionCheckResult> CheckAsync(SqlConnection connection, CancellationToken ct = default)
     {
