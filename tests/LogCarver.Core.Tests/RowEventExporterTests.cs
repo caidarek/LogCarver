@@ -67,6 +67,56 @@ public class RowEventExporterTests
     }
 
     [Fact]
+    public void ToSql_UndoAndReplaySections_OnlyAppearWhenRequested()
+    {
+        var events = new[] { MakeEvent(RowEventKind.Delete, Row(5, "hello"), null) };
+
+        string undoOnly = RowEventExporter.ToSql(events, "dbo.Orders", includeUndoSql: true, includeReplaySql: false);
+        string replayOnly = RowEventExporter.ToSql(events, "dbo.Orders", includeUndoSql: false, includeReplaySql: true);
+
+        Assert.Contains("-- UNDO", undoOnly);
+        Assert.Contains("INSERT INTO [dbo].[Orders]", undoOnly); // the undo for a DELETE
+        Assert.DoesNotContain("-- REPLAY", undoOnly);
+
+        Assert.Contains("-- REPLAY", replayOnly);
+        Assert.Contains("DELETE FROM [dbo].[Orders]", replayOnly); // the replay for a DELETE
+        Assert.DoesNotContain("-- UNDO", replayOnly);
+    }
+
+    [Fact]
+    public void ToSql_WithNeitherUndoNorReplayRequested_SkipsEveryEvent_ReturningAnEmptyScript()
+    {
+        var events = new[] { MakeEvent(RowEventKind.Delete, Row(5, "hello"), null) };
+
+        string sql = RowEventExporter.ToSql(events, "dbo.Orders", includeUndoSql: false, includeReplaySql: false);
+
+        Assert.Equal("", sql);
+    }
+
+    [Fact]
+    public void ToSql_HeaderComment_HasLsnTimestampAndUppercaseKind()
+    {
+        var events = new[] { MakeEvent(RowEventKind.Insert, null, Row(5, "hello")) };
+
+        string sql = RowEventExporter.ToSql(events, "dbo.Orders", includeUndoSql: true, includeReplaySql: false);
+
+        Assert.Contains("-- [0001:0002:0003 2026-09-28 12:00:00.500] INSERT", sql);
+    }
+
+    [Fact]
+    public void ToSql_WithNoResolvableTimestamp_PrintsTimeUnknownInTheHeaderComment()
+    {
+        var events = new[]
+        {
+            new RowEvent("0001:0002:0003", RowEventKind.Insert, null, Row(5, "hello"), null, Timestamp: null, "0001:0F", 1),
+        };
+
+        string sql = RowEventExporter.ToSql(events, "dbo.Orders", includeUndoSql: true, includeReplaySql: false);
+
+        Assert.Contains("-- [0001:0002:0003 time unknown] INSERT", sql);
+    }
+
+    [Fact]
     public void ToJson_RoundTripsKindAsUppercaseStringAndPreservesColumnValues()
     {
         var events = new[] { MakeEvent(RowEventKind.Update, Row(5, "old"), Row(5, "new")) };
