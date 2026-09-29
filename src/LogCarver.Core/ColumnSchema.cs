@@ -19,8 +19,14 @@ namespace LogCarver.Core;
 /// </param>
 /// <param name="MaxLength">Declared max length in bytes.</param>
 /// <param name="SystemTypeId">
-/// sys.types.system_type_id. Only 56 (int), 42 (datetime2), 167 (varchar),
-/// 231 (nvarchar), 175 (char), 239 (nchar) are currently decoded.
+/// sys.types.system_type_id. Only 56 (int), 40 (date), 42 (datetime2),
+/// 106/108 (decimal/numeric), 167 (varchar), 231 (nvarchar), 175 (char),
+/// 239 (nchar) are currently decoded.
+/// </param>
+/// <param name="Scale">
+/// sys.columns.scale - only meaningful for decimal/numeric (where digits
+/// after this many trailing decimal digits are places), 0/unused for every
+/// other supported type.
 /// </param>
 public sealed record ColumnSchema(
     string Name,
@@ -28,4 +34,5 @@ public sealed record ColumnSchema(
     int LeafOffset,
     int LeafNullBit,
     int MaxLength,
-    int SystemTypeId);
+    int SystemTypeId,
+    int Scale = 0);

@@ -34,7 +34,10 @@ namespace LogCarver.Core;
 public static class RowDecoder
 {
     private const int TypeInt = 56;
+    private const int TypeDate = 40;
     private const int TypeDateTime2 = 42;
+    private const int TypeDecimal = 106;
+    private const int TypeNumeric = 108;
     private const int TypeChar = 175;
     private const int TypeNVarChar = 231;
     private const int TypeNChar = 239;
@@ -95,7 +98,9 @@ public static class RowDecoder
             result[col.Name] = col.SystemTypeId switch
             {
                 TypeInt => BitConverter.ToInt32(row.Slice(col.LeafOffset, 4)),
+                TypeDate => DecodeDate(row, col.LeafOffset),
                 TypeDateTime2 => DecodeDateTime2(row, col.LeafOffset, col.MaxLength),
+                TypeDecimal or TypeNumeric => DecodeDecimal(row, col.LeafOffset, col.MaxLength, col.Scale),
                 // char/nchar are fixed-length in-row, always stored padded
                 // with spaces (0x20 / U+0020) out to the declared length -
                 // decoded as-is, without trimming, to match what a live
@@ -176,6 +181,20 @@ public static class RowDecoder
         return ((byteVal >> bitInByte) & 1) != 0;
     }
 
+    /// <summary>
+    /// DATE is stored in-row as the same 3-byte little-endian "days since
+    /// 0001-01-01" value as the date part of DATETIME2 (see
+    /// <see cref="DecodeDateTime2"/>) - just without the trailing time
+    /// portion, since DATE has no time component at all.
+    /// </summary>
+    private static DateTime DecodeDate(ReadOnlySpan<byte> row, int offset)
+    {
+        Span<byte> dateBuf = stackalloc byte[4];
+        row.Slice(offset, 3).CopyTo(dateBuf);
+        uint days = BitConverter.ToUInt32(dateBuf);
+        return new DateTime(1, 1, 1, 0, 0, 0, DateTimeKind.Unspecified).AddDays(days);
+    }
+
     private static DateTime DecodeDateTime2(ReadOnlySpan<byte> row, int offset, int length)
     {
         int timeLen = length - 3;
@@ -197,6 +216,37 @@ public static class RowDecoder
         return new DateTime(1, 1, 1, 0, 0, 0, DateTimeKind.Unspecified)
             .AddDays(days)
             .AddMilliseconds(ticks);
+    }
+
+    /// <summary>
+    /// DECIMAL/NUMERIC storage (verified byte-for-byte against real
+    /// captured fn_dblog output for both a positive and a negative value):
+    /// 1 sign byte (1 = positive, 0 = negative - the opposite of what you'd
+    /// guess) followed by 4/8/12/16 bytes holding the unscaled magnitude as
+    /// 1-4 little-endian uint32 "digit groups", least-significant group
+    /// first, combined as one big base-2^32 integer. The actual value is
+    /// that integer divided by 10^Scale.
+    /// </summary>
+    private static decimal DecodeDecimal(ReadOnlySpan<byte> row, int offset, int length, int scale)
+    {
+        int groupCount = (length - 1) / 4;
+        if (length != 1 + groupCount * 4 || groupCount is < 1 or > 3)
+        {
+            // groupCount==4 (17-byte storage, precision 29-38) needs a
+            // 128-bit magnitude, which does not fit System.Decimal's
+            // 96-bit mantissa in general - refuse rather than truncate or
+            // overflow silently. Not validated against real data at any
+            // length outside 1-3 groups (precision 1-28).
+            throw new NotSupportedException(
+                $"DECIMAL/NUMERIC storage length {length} is not supported (precision outside 1-28); refusing to decode.");
+        }
+
+        bool positive = row[offset] != 0;
+        Span<int> groups = stackalloc int[3];
+        for (int i = 0; i < groupCount; i++)
+            groups[i] = (int)BitConverter.ToUInt32(row.Slice(offset + 1 + i * 4, 4));
+
+        return new decimal(groups[0], groups[1], groups[2], !positive, (byte)scale);
     }
 
     private static readonly Encoding Windows1252Encoding = CreateWindows1252();

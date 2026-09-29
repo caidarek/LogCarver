@@ -38,4 +38,7 @@ public static class SqlConnectionFactory
         }
         return builder.ConnectionString;
     }
+
+    /// <summary>Escapes a name for safe use inside [brackets] in a dynamically built statement (e.g. ALTER DATABASE).</summary>
+    public static string EscapeIdentifier(string name) => name.Replace("]", "]]");
 }

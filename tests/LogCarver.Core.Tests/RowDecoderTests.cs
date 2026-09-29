@@ -45,6 +45,21 @@ public class RowDecoderTests
         new ColumnSchema("NC", 3, LeafOffset: 13, LeafNullBit: 3, MaxLength: 10, SystemTypeId: 239),
     ];
 
+    // dbo.T3: Id INT, D DATE
+    private static readonly IReadOnlyList<ColumnSchema> DateSchema =
+    [
+        new ColumnSchema("Id", 1, LeafOffset: 4, LeafNullBit: 1, MaxLength: 4, SystemTypeId: 56),
+        new ColumnSchema("D", 2, LeafOffset: 8, LeafNullBit: 2, MaxLength: 3, SystemTypeId: 40),
+    ];
+
+    // dbo.DecimalTest: Id INT, Small DECIMAL(5,2), Big DECIMAL(18,4)
+    private static readonly IReadOnlyList<ColumnSchema> DecimalSchema =
+    [
+        new ColumnSchema("Id", 1, LeafOffset: 4, LeafNullBit: 1, MaxLength: 4, SystemTypeId: 56),
+        new ColumnSchema("Small", 2, LeafOffset: 8, LeafNullBit: 2, MaxLength: 5, SystemTypeId: 106, Scale: 2),
+        new ColumnSchema("Big", 3, LeafOffset: 13, LeafNullBit: 3, MaxLength: 9, SystemTypeId: 106, Scale: 4),
+    ];
+
     [Fact]
     public void Decode_RealInsertRow_MatchesGroundTruth()
     {
@@ -139,5 +154,71 @@ public class RowDecoderTests
         Assert.Equal(1, result["Id"]);
         Assert.Equal("ab   ", result["C"]);
         Assert.Equal("xy   ", result["NC"]);
+    }
+
+    [Fact]
+    public void Decode_DateColumn_DecodesAsDaysSinceYearOne()
+    {
+        // Synthetic row (not captured from a real instance): Id=42, D=2026-01-15.
+        // DATE (system_type_id 40) was entirely unimplemented until this test -
+        // every row from a table with a DATE column failed to decode at all
+        // (real customer impact: StockDecisionDaily/StockPriceDaily-style
+        // tables with a plain date column), which in turn made
+        // RowEventExporter.ToSql silently produce an empty file for every
+        // event in such a table since UndoSqlGenerator/ReplaySqlGenerator
+        // both require a non-null Before/After image to work from.
+        //
+        // 2026-01-15 is 739630 days after 0001-01-01 (independently computed
+        // via .NET's own DateTime subtraction, not via this decoder), stored
+        // as the same 3-byte little-endian day count DATETIME2's date part
+        // already uses: 739630 = 0x000B492E -> bytes 2E 49 0B.
+        byte[] row = Convert.FromHexString("10000B002A0000002E490B020000");
+
+        var result = RowDecoder.Decode(row, DateSchema);
+
+        Assert.Equal(42, result["Id"]);
+        Assert.Equal(new DateTime(2026, 1, 15), result["D"]);
+    }
+
+    [Fact]
+    public void Decode_PositiveDecimalColumns_MatchesGroundTruth()
+    {
+        // Real captured row for INSERT INTO dbo.DecimalTest (Id, Small, Big)
+        // VALUES (1, 123.45, 123456789012.3456), against a real SQL Server
+        // instance. DECIMAL/NUMERIC (system_type_id 106/108) was entirely
+        // unimplemented until this test - every row from a table with any
+        // decimal/numeric column failed to decode at all (real customer
+        // impact: DECISION.StockDecisionDaily's ConfidenceScore/
+        // EvidenceCompleteness/TargetPrice columns, found the same day as
+        // the DATE gap above - fixing DATE alone was not enough for that
+        // table).
+        byte[] row = Convert.FromHexString(
+            "1000160001000000013930000001C0BA8A3CD5620400030000");
+
+        var result = RowDecoder.Decode(row, DecimalSchema);
+
+        Assert.Equal(1, result["Id"]);
+        Assert.Equal(123.45m, result["Small"]);
+        Assert.Equal(123456789012.3456m, result["Big"]);
+    }
+
+    [Fact]
+    public void Decode_NegativeDecimalColumns_SignByteIsInverted()
+    {
+        // Real captured row for INSERT INTO dbo.DecimalTest (Id, Small, Big)
+        // VALUES (2, -123.45, -123456789012.3456) - same magnitude bytes as
+        // the positive-value test above, only the sign byte differs (0x00
+        // here vs 0x01 there), confirming SQL Server's convention is
+        // 1 = positive, 0 = negative (the opposite of the usual sign-bit
+        // convention, easy to get backwards without a real captured
+        // negative example to check against).
+        byte[] row = Convert.FromHexString(
+            "1000160002000000003930000000C0BA8A3CD5620400030000");
+
+        var result = RowDecoder.Decode(row, DecimalSchema);
+
+        Assert.Equal(2, result["Id"]);
+        Assert.Equal(-123.45m, result["Small"]);
+        Assert.Equal(-123456789012.3456m, result["Big"]);
     }
 }
