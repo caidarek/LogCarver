@@ -66,6 +66,30 @@ public class RowEventExporterTests
         Assert.Contains("INSERT INTO [dbo].[Orders]", withSql); // the undo for a DELETE
     }
 
+    [Theory]
+    [InlineData("=cmd|'/c calc'!A1")]
+    [InlineData("+1+1")]
+    [InlineData("-1+1")]
+    [InlineData("@SUM(1,1)")]
+    public void ToCsv_ValueStartingWithAFormulaTriggerChar_GetsAnApostrophePrefix_ToPreventFormulaInjection(string maliciousValue)
+    {
+        var events = new[] { MakeEvent(RowEventKind.Insert, null, Row(5, maliciousValue)) };
+
+        string csv = RowEventExporter.ToCsv(events, Schema, "dbo.Orders", includeUndoSql: false, includeReplaySql: false);
+
+        Assert.Contains($"'{maliciousValue}", csv);
+    }
+
+    [Fact]
+    public void ToCsv_OrdinaryValueNotStartingWithATriggerChar_IsUnaffected()
+    {
+        var events = new[] { MakeEvent(RowEventKind.Insert, null, Row(5, "hello")) };
+
+        string csv = RowEventExporter.ToCsv(events, Schema, "dbo.Orders", includeUndoSql: false, includeReplaySql: false);
+
+        Assert.Contains(",5,hello,", csv);
+    }
+
     [Fact]
     public void ToSql_UndoAndReplaySections_OnlyAppearWhenRequested()
     {

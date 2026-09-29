@@ -142,11 +142,27 @@ public static class RowEventExporter
             : value.ToString() ?? "";
     }
 
+    // CSV/formula injection (CWE-1236): a cell opened in Excel/Sheets whose
+    // text starts with =, +, -, or @ can be interpreted as a formula rather
+    // than plain text. The values here come from recovered database rows,
+    // which this tool exists to examine precisely when the database may
+    // have been tampered with - an attacker-planted value is exactly the
+    // kind of content that could land in a cell here. Prefixing with a
+    // leading apostrophe forces spreadsheet apps to treat it as text; it's
+    // invisible in the rendered cell and doesn't change the value CSV
+    // parsers (or a human diffing the file) see.
+    private static readonly char[] FormulaTriggerChars = ['=', '+', '-', '@', '\t', '\r'];
+
     // RFC 4180: quote a field only if it contains a comma, quote, or line
     // break, and double up any internal quotes - quoting everything
     // unconditionally would still be correct but is noisier to read.
-    private static string CsvEscape(string value) =>
-        value.IndexOfAny([',', '"', '\n', '\r']) < 0
+    private static string CsvEscape(string value)
+    {
+        if (value.Length > 0 && FormulaTriggerChars.Contains(value[0]))
+            value = "'" + value;
+
+        return value.IndexOfAny([',', '"', '\n', '\r']) < 0
             ? value
             : $"\"{value.Replace("\"", "\"\"")}\"";
+    }
 }
