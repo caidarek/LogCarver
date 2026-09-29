@@ -4,6 +4,17 @@
     <TargetFramework>net10.0</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
+    <!--
+      NU1510 is a false positive for this package: it flags
+      System.Text.Encoding.CodePages as prunable because its trim-analysis
+      doesn't see RowDecoder.cs's direct reference to
+      CodePagesEncodingProvider.Instance as a "use" of it. That call is
+      load-bearing (varchar/char columns need it for non-Unicode code
+      pages, e.g. Windows-1252) - do not remove the package reference to
+      silence this; it would compile fine and then misdecode string
+      columns at runtime with no error.
+    -->
+    <NoWarn>NU1510</NoWarn>
   </PropertyGroup>
 
   <ItemGroup>
