@@ -51,6 +51,32 @@ public static class RowEventExporter
         return sb.ToString();
     }
 
+    /// <summary>
+    /// A plain, runnable-looking .sql script: one comment line identifying
+    /// the source event (LSN/timestamp/kind) followed by its Undo and/or
+    /// Replay statement. Caller must request at least one of the two -
+    /// a script with only comment lines isn't a useful export.
+    /// </summary>
+    public static string ToSql(
+        IReadOnlyList<RowEvent> events, string tableName, bool includeUndoSql, bool includeReplaySql)
+    {
+        var sb = new StringBuilder();
+        foreach (var e in events)
+        {
+            string? undoSql = includeUndoSql ? UndoSqlGenerator.Generate(e, tableName) : null;
+            string? replaySql = includeReplaySql ? ReplaySqlGenerator.Generate(e, tableName) : null;
+            if (undoSql is null && replaySql is null)
+                continue;
+
+            string when = e.Timestamp?.ToString("yyyy-MM-dd HH:mm:ss.fff", CultureInfo.InvariantCulture) ?? "time unknown";
+            sb.Append($"-- [{e.Lsn} {when}] {e.Kind.ToString().ToUpperInvariant()}").Append('\n');
+            if (undoSql is not null) sb.Append("-- UNDO\n").Append(undoSql).Append('\n');
+            if (replaySql is not null) sb.Append("-- REPLAY\n").Append(replaySql).Append('\n');
+            sb.Append('\n');
+        }
+        return sb.ToString();
+    }
+
     public static string ToJson(IReadOnlyList<RowEvent> events, string tableName, bool includeUndoSql, bool includeReplaySql)
     {
         var exportable = events.Select(e => new ExportedEvent(
