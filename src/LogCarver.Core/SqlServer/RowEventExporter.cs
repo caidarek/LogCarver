@@ -1,6 +1,7 @@
 using System.Globalization;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 
 namespace LogCarver.Core.SqlServer;
 
@@ -77,19 +78,59 @@ public static class RowEventExporter
         return sb.ToString();
     }
 
+    /// <summary>
+    /// Built with System.Text.Json.Nodes (JsonObject/JsonArray/JsonValue)
+    /// rather than JsonSerializer.Serialize&lt;T&gt; against a POCO -
+    /// LogCarverOffline.Cli is PublishAot, which disables the
+    /// reflection-based serializer this method used to rely on, and the
+    /// row values here are a bag of `object?` with no fixed shape a
+    /// source-generated JsonSerializerContext could describe. JsonNode's
+    /// own writer is hand-coded, not reflection, so it works under AOT.
+    /// </summary>
     public static string ToJson(IReadOnlyList<RowEvent> events, string tableName, bool includeUndoSql, bool includeReplaySql)
     {
-        var exportable = events.Select(e => new ExportedEvent(
-            e.Lsn,
-            e.Timestamp,
-            e.Kind.ToString().ToUpperInvariant(),
-            e.Before,
-            e.After,
-            e.Note,
-            includeUndoSql ? UndoSqlGenerator.Generate(e, tableName) : null,
-            includeReplaySql ? ReplaySqlGenerator.Generate(e, tableName) : null))
-            .ToList();
-        return JsonSerializer.Serialize(exportable, new JsonSerializerOptions { WriteIndented = true });
+        var array = new JsonArray();
+        foreach (var e in events)
+        {
+            var obj = new JsonObject
+            {
+                ["Lsn"] = e.Lsn,
+                ["Timestamp"] = e.Timestamp is { } t ? JsonValue.Create(t) : null,
+                ["Kind"] = e.Kind.ToString().ToUpperInvariant(),
+                ["Before"] = ToJsonObject(e.Before),
+                ["After"] = ToJsonObject(e.After),
+                ["Note"] = e.Note,
+                ["UndoSql"] = includeUndoSql ? UndoSqlGenerator.Generate(e, tableName) : null,
+                ["ReplaySql"] = includeReplaySql ? ReplaySqlGenerator.Generate(e, tableName) : null,
+            };
+            // Not array.Add(obj): JsonArray.Add<T>(T) is an exact-type
+            // generic match, so plain overload resolution picks it over
+            // the non-generic Add(JsonNode?) - and that generic overload
+            // needs runtime codegen for a non-primitive T, which is exactly
+            // what PublishAot's trim/AOT analysis (IL2026/IL3050) flagged
+            // building this project. The explicit cast forces the
+            // non-generic, reflection-free overload instead.
+            array.Add((JsonNode?)obj);
+        }
+        return array.ToJsonString(new JsonSerializerOptions { WriteIndented = true });
+    }
+
+    private static JsonObject? ToJsonObject(IReadOnlyDictionary<string, object?>? row)
+    {
+        if (row is null) return null;
+        var obj = new JsonObject();
+        foreach (var (key, value) in row)
+        {
+            obj[key] = value switch
+            {
+                null => null,
+                int i => JsonValue.Create(i),
+                DateTime dt => JsonValue.Create(dt),
+                string s => JsonValue.Create(s),
+                _ => JsonValue.Create(value.ToString()),
+            };
+        }
+        return obj;
     }
 
     private static string CellValue(IReadOnlyDictionary<string, object?>? row, string column)
@@ -108,14 +149,4 @@ public static class RowEventExporter
         value.IndexOfAny([',', '"', '\n', '\r']) < 0
             ? value
             : $"\"{value.Replace("\"", "\"\"")}\"";
-
-    private sealed record ExportedEvent(
-        string Lsn,
-        DateTime? Timestamp,
-        string Kind,
-        IReadOnlyDictionary<string, object?>? Before,
-        IReadOnlyDictionary<string, object?>? After,
-        string? Note,
-        string? UndoSql,
-        string? ReplaySql);
 }
