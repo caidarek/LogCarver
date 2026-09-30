@@ -1,14 +1,31 @@
 namespace LogCarver.Core.SqlServer;
 
 /// <summary>One row from fn_dblog, narrowed to the columns RowDecoder needs.</summary>
-/// <param name="PossiblyCorrupted">
-/// Always false for a record read via fn_dblog (SQL Server's own log-reading
-/// code has already fixed up anything an offline byte-level reader would
-/// see corrupted). An offline reader (see LogCarverOffline's
-/// LogRecordAdapter) sets this when the record's bytes crossed a physical
-/// artifact it can detect but not repair - callers should treat any
-/// decoded value from a record with this set as unverified, not silently
-/// trustworthy.
+/// <param name="PossiblyCorruptedOffsetsInRowLogContents0">
+/// Always empty for a record read via fn_dblog (SQL Server's own
+/// log-reading code has already fixed up anything an offline byte-level
+/// reader would see corrupted). An offline reader (see
+/// LogCarverOffline's LogRecordAdapter/PartitionScanner) populates this
+/// with the specific byte offsets - relative to the start of
+/// RowLogContents0 itself, directly usable as a position into the bytes
+/// RowDecoder.Decode receives - where it detected a physical artifact it
+/// can flag but not repair. Deliberately per-offset rather than a single
+/// bool: a whole-record flag was tried first and turned out to mark
+/// ~94% of a real customer table's events, since most rows are wide
+/// enough to have some byte somewhere touch the artifact even when the
+/// specific bytes that became a decoded value never did - see
+/// research_notes.md and RowDecoder's use of this list to flag only the
+/// specific column(s) actually affected.
+/// </param>
+/// <param name="PossiblyCorruptedOffsetsInRowLogContents1">
+/// Same as <paramref name="PossiblyCorruptedOffsetsInRowLogContents0"/>,
+/// for RowLogContents1. Only RowLogContents0 is ever decoded directly
+/// into column values (LOP_INSERT_ROWS/LOP_DELETE_ROWS); RowLogContents1
+/// only matters for LOP_MODIFY_ROW's byte-range splice
+/// (RowPatcher.ApplyForward), where precise per-column attribution
+/// through the splice arithmetic isn't implemented yet - a non-empty
+/// list here currently only contributes to a coarser, whole-update note
+/// via RowHistoryReconstructor, not a per-column one.
 /// </param>
 public sealed record LogRecord(
     string Lsn,
@@ -21,4 +38,5 @@ public sealed record LogRecord(
     string? TransactionId,
     byte[]? RowLogContents0,
     byte[]? RowLogContents1,
-    bool PossiblyCorrupted = false);
+    IReadOnlyList<int>? PossiblyCorruptedOffsetsInRowLogContents0 = null,
+    IReadOnlyList<int>? PossiblyCorruptedOffsetsInRowLogContents1 = null);

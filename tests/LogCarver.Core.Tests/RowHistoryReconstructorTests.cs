@@ -22,14 +22,24 @@ public class RowHistoryReconstructorTests
     private static readonly byte[] Rlc0 = Convert.FromHexString("E903"); // Amount 1001
     private static readonly byte[] Rlc1 = Convert.FromHexString("2923"); // Amount 9001
 
+    // possiblyCorrupted translates to a boundary offset landing at row byte
+    // 4 - inside LogTestSchema's "Id" column (LeafOffset 4) - so the new
+    // per-column check in RowDecoder actually has something real to flag,
+    // not an untested placeholder position. Update's own flag stays
+    // coarse (RowHistoryReconstructor doesn't attempt per-column
+    // attribution through RowPatcher's splice yet), so any non-empty
+    // offset works there regardless of what it lands on.
     private static LogRecord Insert(string lsn, string pageId, int slotId, byte[] bytes, bool possiblyCorrupted = false) =>
-        new(lsn, "LOP_INSERT_ROWS", "LCX_CLUSTERED", null, "dbo.LogTest.pk", pageId, slotId, null, bytes, null, possiblyCorrupted);
+        new(lsn, "LOP_INSERT_ROWS", "LCX_CLUSTERED", null, "dbo.LogTest.pk", pageId, slotId, null, bytes, null,
+            possiblyCorrupted ? [4] : null);
 
     private static LogRecord Delete(string lsn, string pageId, int slotId, byte[] bytes, bool possiblyCorrupted = false) =>
-        new(lsn, "LOP_DELETE_ROWS", "LCX_MARK_AS_GHOST", null, "dbo.LogTest.pk", pageId, slotId, null, bytes, null, possiblyCorrupted);
+        new(lsn, "LOP_DELETE_ROWS", "LCX_MARK_AS_GHOST", null, "dbo.LogTest.pk", pageId, slotId, null, bytes, null,
+            possiblyCorrupted ? [4] : null);
 
     private static LogRecord Update(string lsn, string pageId, int slotId, int offset, byte[] rlc0, byte[] rlc1, bool possiblyCorrupted = false) =>
-        new(lsn, "LOP_MODIFY_ROW", "LCX_CLUSTERED", offset, "dbo.LogTest.pk", pageId, slotId, null, rlc0, rlc1, possiblyCorrupted);
+        new(lsn, "LOP_MODIFY_ROW", "LCX_CLUSTERED", offset, "dbo.LogTest.pk", pageId, slotId, null, rlc0, rlc1,
+            possiblyCorrupted ? [0] : null);
 
     // Real captured LOP_MODIFY_COLUMNS RowLogContents0/1 (a column-level
     // change descriptor, NOT a byte-range splice - see the operation's own
@@ -194,5 +204,39 @@ public class RowHistoryReconstructorTests
         var history = RowHistoryReconstructor.Reconstruct(records, LogTestSchema, ddlBoundaryLsns: []);
 
         Assert.Contains("512-byte log block boundary", history[1].Note);
+    }
+
+    [Fact]
+    public void PossiblyCorruptedInsert_NamesOnlyTheColumnWhoseBytesAreActuallyAffected()
+    {
+        // Row byte 4 is inside "Id" (LeafOffset 4, 4 bytes: 4-7) - not
+        // inside "Amount" (LeafOffset 15) or either variable-length
+        // column. Only Id should be named; a whole-record flag would
+        // have named none of them specifically (or all of them).
+        var record = new LogRecord("00000001", "LOP_INSERT_ROWS", "LCX_CLUSTERED", null, "dbo.LogTest.pk", "0001:0F", 3, null,
+            InsertRow, null, PossiblyCorruptedOffsetsInRowLogContents0: [4]);
+
+        var history = RowHistoryReconstructor.Reconstruct([record], LogTestSchema, ddlBoundaryLsns: []);
+
+        Assert.Contains("[Id]", history[0].Note);
+        Assert.DoesNotContain("Amount", history[0].Note);
+        Assert.DoesNotContain("Sentinel", history[0].Note);
+        Assert.Equal(1, history[0].After!["Id"]); // still decoded - a flag isn't a refusal
+    }
+
+    [Fact]
+    public void PossiblyCorruptedInsert_OffsetNotOverlappingAnyColumn_ProducesNoNote()
+    {
+        // Row byte 0 is TagA/TagB/fixedEnd (the row's own internal
+        // framing) - never decoded into any column's value. Confirms the
+        // per-column check doesn't degrade back into "flag if the record
+        // touched a boundary anywhere," which is exactly the over-broad
+        // (~94% of a real table's events) behavior this feature replaced.
+        var record = new LogRecord("00000001", "LOP_INSERT_ROWS", "LCX_CLUSTERED", null, "dbo.LogTest.pk", "0001:0F", 3, null,
+            InsertRow, null, PossiblyCorruptedOffsetsInRowLogContents0: [0]);
+
+        var history = RowHistoryReconstructor.Reconstruct([record], LogTestSchema, ddlBoundaryLsns: []);
+
+        Assert.Null(history[0].Note);
     }
 }

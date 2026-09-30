@@ -72,11 +72,39 @@ public static class RowDecoder
         return Decode(row, schema);
     }
 
-    public static IReadOnlyDictionary<string, object?> Decode(ReadOnlySpan<byte> row, IReadOnlyList<ColumnSchema> schema)
+    /// <summary>
+    /// Same as the four-argument overload, but additionally flags which
+    /// specific columns' own bytes overlap <paramref name="possiblyCorruptedOffsets"/>
+    /// (offsets into <paramref name="row"/> itself - e.g. from
+    /// LogRecord.PossiblyCorruptedOffsetsInRowLogContents0). Only that
+    /// column's value is suspect, not the whole row - every other column
+    /// decodes and is trusted normally. Empty when nothing is flagged.
+    /// </summary>
+    public static IReadOnlyDictionary<string, object?> Decode(
+        ReadOnlySpan<byte> row, IReadOnlyList<ColumnSchema> schema,
+        string recordLsn, IReadOnlyList<string> ddlBoundaryLsns,
+        IReadOnlyList<int> possiblyCorruptedOffsets, out IReadOnlyList<string> possiblyCorruptedColumns)
+    {
+        foreach (var boundaryLsn in ddlBoundaryLsns)
+        {
+            if (string.CompareOrdinal(recordLsn, boundaryLsn) < 0)
+                throw new SchemaDriftException(recordLsn, boundaryLsn);
+        }
+        return Decode(row, schema, possiblyCorruptedOffsets, out possiblyCorruptedColumns);
+    }
+
+    public static IReadOnlyDictionary<string, object?> Decode(ReadOnlySpan<byte> row, IReadOnlyList<ColumnSchema> schema) =>
+        Decode(row, schema, [], out _);
+
+    public static IReadOnlyDictionary<string, object?> Decode(
+        ReadOnlySpan<byte> row, IReadOnlyList<ColumnSchema> schema,
+        IReadOnlyList<int> possiblyCorruptedOffsets, out IReadOnlyList<string> possiblyCorruptedColumns)
     {
         try
         {
-            return DecodeCore(row, schema);
+            var (values, corrupted) = DecodeCore(row, schema, possiblyCorruptedOffsets);
+            possiblyCorruptedColumns = corrupted;
+            return values;
         }
         catch (Exception ex) when (ex is ArgumentOutOfRangeException or IndexOutOfRangeException)
         {
@@ -94,13 +122,30 @@ public static class RowDecoder
         }
     }
 
-    private static IReadOnlyDictionary<string, object?> DecodeCore(ReadOnlySpan<byte> row, IReadOnlyList<ColumnSchema> schema)
+    private static bool OverlapsAny(IReadOnlyList<int> possiblyCorruptedOffsets, int start, int length)
+    {
+        if (length <= 0) return false;
+        foreach (int offset in possiblyCorruptedOffsets)
+        {
+            if (offset >= start && offset < start + length) return true;
+        }
+        return false;
+    }
+
+    private static (IReadOnlyDictionary<string, object?> Values, IReadOnlyList<string> PossiblyCorruptedColumns) DecodeCore(
+        ReadOnlySpan<byte> row, IReadOnlyList<ColumnSchema> schema, IReadOnlyList<int> possiblyCorruptedOffsets)
     {
         byte tagA = row[0];
         bool hasVarCols = (tagA & 0x20) != 0;
         int fixedEnd = ReadUInt16LE(row, 2);
 
         var result = new Dictionary<string, object?>();
+        HashSet<string>? possiblyCorruptedColumns = null;
+        void FlagIfOverlapping(string columnName, int start, int length)
+        {
+            if (OverlapsAny(possiblyCorruptedOffsets, start, length))
+                (possiblyCorruptedColumns ??= []).Add(columnName);
+        }
 
         foreach (var col in schema)
         {
@@ -129,11 +174,32 @@ public static class RowDecoder
 
         // Fixed-length columns: bytes were decoded above regardless of
         // null-ness (a NULL fixed-length column's bytes are meaningless),
-        // now overwrite with null where the bitmap says so.
+        // now overwrite with null where the bitmap says so. The overlap
+        // check has to live here too, not in the decode loop above - a
+        // NULL column's reserved bytes are never actually read to produce
+        // its value, so a boundary artifact landing there can't have
+        // corrupted anything; flagging it anyway would silently
+        // reintroduce a smaller-scale version of the same over-broad
+        // "flagged but nothing decoded from these bytes actually mattered"
+        // problem the per-column redesign exists to eliminate (see
+        // research_notes.md's "94%" finding, which was at the whole-row
+        // level instead of one column).
         foreach (var col in schema)
         {
             if (col.LeafOffset < 0) continue;
-            if (IsColNull(row, nullBitmapStart, col.LeafNullBit)) result[col.Name] = null;
+            bool isNull = IsColNull(row, nullBitmapStart, col.LeafNullBit);
+            if (isNull)
+            {
+                result[col.Name] = null;
+                continue;
+            }
+            // TypeInt is always 4 bytes and TypeDate always 3, regardless
+            // of the schema's own declared MaxLength for either (neither
+            // ever varies) - every other fixed-length type here reads
+            // exactly col.MaxLength bytes, so that's the right byte count
+            // to check for overlap in every other case.
+            int fixedByteLength = col.SystemTypeId switch { TypeInt => 4, TypeDate => 3, _ => col.MaxLength };
+            FlagIfOverlapping(col.Name, col.LeafOffset, fixedByteLength);
         }
 
         if (hasVarCols)
@@ -151,7 +217,8 @@ public static class RowDecoder
             for (int i = 0; i < varColCount; i++)
             {
                 ColumnSchema? col = i < varCols.Count ? varCols[i] : null;
-                int rawEndOffset = ReadUInt16LE(row, offsetArrayStart + i * 2);
+                int offsetEntryPos = offsetArrayStart + i * 2;
+                int rawEndOffset = ReadUInt16LE(row, offsetEntryPos);
 
                 // Bit 0x8000 on an offset-array entry is SQL Server's
                 // "complex column" flag - it means this column's in-row
@@ -170,6 +237,15 @@ public static class RowDecoder
 
                 if (col is not null)
                 {
+                    // The offset-array entry itself is a real 2-byte value
+                    // this decoder reads and trusts - flagging it isn't
+                    // optional polish. This is exactly the mechanism behind
+                    // the original real bug this whole feature exists for:
+                    // DecisionFlag's entry (not its data bytes) was the one
+                    // corrupted, computing a wildly wrong length that read
+                    // 63 bytes into two unrelated downstream columns.
+                    FlagIfOverlapping(col.Name, offsetEntryPos, 2);
+
                     if (isComplexColumn)
                     {
                         // Off-row/complex value: only a root pointer lives
@@ -198,6 +274,7 @@ public static class RowDecoder
                             : len > 0
                                 ? DecodeVarCharBytes(row.Slice(prevEnd, len), col.SystemTypeId)
                                 : string.Empty; // len==0 and not null = legitimate empty string, not NULL
+                        if (!isNull) FlagIfOverlapping(col.Name, prevEnd, len);
                     }
                 }
                 // Always chain from the masked offset - later columns'
@@ -215,7 +292,7 @@ public static class RowDecoder
             }
         }
 
-        return result;
+        return (result, (IReadOnlyList<string>?)possiblyCorruptedColumns?.ToList() ?? []);
     }
 
     private static int ReadUInt16LE(ReadOnlySpan<byte> bytes, int offset) =>

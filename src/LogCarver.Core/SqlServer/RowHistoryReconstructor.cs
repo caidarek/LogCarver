@@ -30,15 +30,23 @@ public sealed record RowEvent(
 public static class RowHistoryReconstructor
 {
     /// <summary>
-    /// Appended to Note whenever a record (or, for an UPDATE, its known
-    /// before-image) was flagged PossiblyCorrupted - see LogRecord's doc
-    /// comment. This does not mean decoding failed (the values shown may
-    /// well be exactly right); it means at least one byte in this record's
-    /// physical range is known to be unreliable and nothing here can tell
-    /// which one, if any, actually mattered.
+    /// Appended to Note for LOP_MODIFY_ROW (UPDATE) whenever the record
+    /// (or its known before-image) was flagged PossiblyCorrupted - see
+    /// LogRecord's doc comment. Coarse and whole-event, unlike
+    /// INSERT/DELETE's precise per-column note (see
+    /// <see cref="BuildColumnCorruptionNote"/>): translating a boundary
+    /// position through RowPatcher's byte-range splice arithmetic to
+    /// attribute it to one specific column isn't implemented yet, so this
+    /// says "the diff or its base image touched a boundary somewhere",
+    /// not which of Before/After's columns it actually affected.
     /// </summary>
-    internal const string CorruptionNote =
-        "this record's bytes cross a 512-byte log block boundary offline scanning doesn't yet reconstruct - some byte in it may be wrong; verify independently before relying on this value";
+    internal const string UpdateCorruptionNote =
+        "this update's diff and/or its before-image bytes cross a 512-byte log block boundary offline scanning doesn't yet reconstruct - some value here may be wrong; verify independently before relying on it";
+
+    private static string BuildColumnCorruptionNote(IReadOnlyList<string> columns) =>
+        $"column(s) [{string.Join(", ", columns)}] may be wrong - byte(s) making up its/their value cross a 512-byte log block boundary offline scanning doesn't yet reconstruct; verify independently before relying on it";
+
+    private static bool HasAny(IReadOnlyList<int>? offsets) => offsets is { Count: > 0 };
 
     public static IReadOnlyList<RowEvent> Reconstruct(
         IEnumerable<LogRecord> recordsInLsnOrder,
@@ -54,41 +62,45 @@ public static class RowHistoryReconstructor
                 : null;
 
         // Per physical slot: the most recently known row image, the LSN it
-        // was actually written at, and whether that image came from a
-        // record LogCarverOffline flagged PossiblyCorrupted (see
-        // LogRecord's doc comment) - a corrupt base image taints every
-        // future UPDATE spliced onto it, not just the record it came from.
-        // The write LSN - not the LSN of whatever record we're currently
-        // looking at - is what the schema-drift guard must check: a row
-        // untouched since before a metadata-only DDL (e.g. ADD COLUMN) is
-        // still physically in the old layout even if we're now looking at
-        // it from a later point in the log.
+        // was actually written at, and whether that image's own record
+        // touched a boundary anywhere in its RowLogContents (coarse - see
+        // UpdateCorruptionNote for why this stays whole-record rather than
+        // per-column) - a corrupt base image taints every future UPDATE
+        // spliced onto it, not just the record it came from. The write
+        // LSN - not the LSN of whatever record we're currently looking
+        // at - is what the schema-drift guard must check: a row untouched
+        // since before a metadata-only DDL (e.g. ADD COLUMN) is still
+        // physically in the old layout even if we're now looking at it
+        // from a later point in the log.
         var state = new Dictionary<(string PageId, int SlotId), (byte[] Bytes, string WrittenAtLsn, bool PossiblyCorrupted)>();
 
-        static string? WithCorruptionNote(string? note, bool possiblyCorrupted) => possiblyCorrupted
-            ? (note is null ? CorruptionNote : $"{note}; {CorruptionNote}")
-            : note;
+        static string? WithNote(string? existing, string? addition) => addition is null
+            ? existing
+            : (existing is null ? addition : $"{existing}; {addition}");
 
         foreach (var record in recordsInLsnOrder)
         {
             if (record.PageId is null || record.SlotId is null) continue;
             var key = (record.PageId, record.SlotId.Value);
+            bool recordTouchedABoundary = HasAny(record.PossiblyCorruptedOffsetsInRowLogContents0) || HasAny(record.PossiblyCorruptedOffsetsInRowLogContents1);
 
             switch (record.Operation)
             {
                 case "LOP_INSERT_ROWS" when record.RowLogContents0 is { Length: > 0 } bytes:
                     {
-                        var decoded = TryDecode(bytes, schema, record.Lsn, ddlBoundaryLsns, out var note);
-                        note = WithCorruptionNote(note, record.PossiblyCorrupted);
+                        var decoded = TryDecode(bytes, schema, record.Lsn, ddlBoundaryLsns,
+                            record.PossiblyCorruptedOffsetsInRowLogContents0 ?? [], out var note, out var corruptedColumns);
+                        if (corruptedColumns.Count > 0) note = WithNote(note, BuildColumnCorruptionNote(corruptedColumns));
                         events.Add(new RowEvent(record.Lsn, RowEventKind.Insert, null, decoded, note, TimestampOf(record), record.PageId, record.SlotId.Value));
-                        state[key] = (bytes, record.Lsn, record.PossiblyCorrupted);
+                        state[key] = (bytes, record.Lsn, recordTouchedABoundary);
                         break;
                     }
 
                 case "LOP_DELETE_ROWS" when record.RowLogContents0 is { Length: > 0 } bytes:
                     {
-                        var decoded = TryDecode(bytes, schema, record.Lsn, ddlBoundaryLsns, out var note);
-                        note = WithCorruptionNote(note, record.PossiblyCorrupted);
+                        var decoded = TryDecode(bytes, schema, record.Lsn, ddlBoundaryLsns,
+                            record.PossiblyCorruptedOffsetsInRowLogContents0 ?? [], out var note, out var corruptedColumns);
+                        if (corruptedColumns.Count > 0) note = WithNote(note, BuildColumnCorruptionNote(corruptedColumns));
                         events.Add(new RowEvent(record.Lsn, RowEventKind.Delete, decoded, null, note, TimestampOf(record), record.PageId, record.SlotId.Value));
                         state.Remove(key);
                         break;
@@ -126,7 +138,7 @@ public static class RowHistoryReconstructor
                             record.RowLogContents1 is not { } rlc1)
                         {
                             events.Add(new RowEvent(record.Lsn, RowEventKind.Update, null, null,
-                                WithCorruptionNote("diff not available (missing offset or RowLog Contents)", record.PossiblyCorrupted),
+                                WithNote("diff not available (missing offset or RowLog Contents)", recordTouchedABoundary ? UpdateCorruptionNote : null),
                                 TimestampOf(record), record.PageId, record.SlotId.Value));
                             break;
                         }
@@ -134,7 +146,7 @@ public static class RowHistoryReconstructor
                         if (!state.TryGetValue(key, out var before))
                         {
                             events.Add(new RowEvent(record.Lsn, RowEventKind.Update, null, null,
-                                WithCorruptionNote("before image unknown - this row's insert (or a prior update) is outside the observed log window", record.PossiblyCorrupted),
+                                WithNote("before image unknown - this row's insert (or a prior update) is outside the observed log window", recordTouchedABoundary ? UpdateCorruptionNote : null),
                                 TimestampOf(record), record.PageId, record.SlotId.Value));
                             break;
                         }
@@ -152,15 +164,16 @@ public static class RowHistoryReconstructor
                             // surface both images' flags, not just the
                             // current record's.
                             events.Add(new RowEvent(record.Lsn, RowEventKind.Update, null, null,
-                                WithCorruptionNote($"patch failed - before image and this diff do not line up ({ex.Message})", before.PossiblyCorrupted || record.PossiblyCorrupted),
+                                WithNote($"patch failed - before image and this diff do not line up ({ex.Message})",
+                                    before.PossiblyCorrupted || recordTouchedABoundary ? UpdateCorruptionNote : null),
                                 TimestampOf(record), record.PageId, record.SlotId.Value));
                             break;
                         }
 
-                        var beforeDecoded = TryDecode(before.Bytes, schema, before.WrittenAtLsn, ddlBoundaryLsns, out var beforeNote);
-                        var afterDecoded = TryDecode(afterBytes, schema, record.Lsn, ddlBoundaryLsns, out var afterNote);
-                        bool possiblyCorrupted = before.PossiblyCorrupted || record.PossiblyCorrupted;
-                        string? note = WithCorruptionNote(beforeNote ?? afterNote, possiblyCorrupted);
+                        var beforeDecoded = TryDecode(before.Bytes, schema, before.WrittenAtLsn, ddlBoundaryLsns, [], out var beforeNote, out _);
+                        var afterDecoded = TryDecode(afterBytes, schema, record.Lsn, ddlBoundaryLsns, [], out var afterNote, out _);
+                        bool possiblyCorrupted = before.PossiblyCorrupted || recordTouchedABoundary;
+                        string? note = WithNote(beforeNote ?? afterNote, possiblyCorrupted ? UpdateCorruptionNote : null);
                         events.Add(new RowEvent(record.Lsn, RowEventKind.Update, beforeDecoded, afterDecoded, note, TimestampOf(record), record.PageId, record.SlotId.Value));
                         state[key] = (afterBytes, record.Lsn, possiblyCorrupted);
                         break;
@@ -172,16 +185,18 @@ public static class RowHistoryReconstructor
     }
 
     private static IReadOnlyDictionary<string, object?>? TryDecode(
-        byte[] bytes, IReadOnlyList<ColumnSchema> schema, string lsn, IReadOnlyList<string> ddlBoundaryLsns, out string? note)
+        byte[] bytes, IReadOnlyList<ColumnSchema> schema, string lsn, IReadOnlyList<string> ddlBoundaryLsns,
+        IReadOnlyList<int> possiblyCorruptedOffsets, out string? note, out IReadOnlyList<string> possiblyCorruptedColumns)
     {
         try
         {
             note = null;
-            return RowDecoder.Decode(bytes, schema, lsn, ddlBoundaryLsns);
+            return RowDecoder.Decode(bytes, schema, lsn, ddlBoundaryLsns, possiblyCorruptedOffsets, out possiblyCorruptedColumns);
         }
         catch (Exception ex) when (ex is SchemaDriftException or NotSupportedException or UnsupportedRowFormatException)
         {
             note = ex.Message;
+            possiblyCorruptedColumns = [];
             return null;
         }
     }

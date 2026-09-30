@@ -139,10 +139,12 @@ public static class RowEventExporter
             // a decode failure (those events never reach here at all - see
             // the undoSql/replaySql null check above) - it's a
             // successfully-decoded value the reconstructor still isn't
-            // fully confident in (currently: PossiblyCorrupted, see
-            // LogRecord's doc comment). Without this line, a customer
-            // reviewing the generated script would have no way to know
-            // this specific statement might be wrong.
+            // fully confident in (currently: a record whose bytes crossed a
+            // detected-but-unrepairable physical artifact - see LogRecord's
+            // PossiblyCorruptedOffsetsInRowLogContents0/1 doc comment).
+            // Without this line, a customer reviewing the generated script
+            // would have no way to know this specific statement might be
+            // wrong.
             if (e.Note is not null) { writer.Write($"-- NOTE: {e.Note}"); writer.Write('\n'); }
             if (undoSql is not null) { writer.Write("-- UNDO\n"); writer.Write(undoSql); writer.Write('\n'); }
             if (replaySql is not null) { writer.Write("-- REPLAY\n"); writer.Write(replaySql); writer.Write('\n'); }

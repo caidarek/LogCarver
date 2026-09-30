@@ -426,4 +426,132 @@ public class RowDecoderTests
         var ex = Assert.Throws<NotSupportedException>(() => RowDecoder.Decode(row, outOfRangeScaleSchema));
         Assert.Contains("out of the valid 0-7 range", ex.Message);
     }
+
+    // Byte layout of Decode_RealInsertRow_MatchesGroundTruth's row, hand-
+    // verified for these tests specifically: Id fixed [4,8), CreatedAt
+    // fixed [8,15), Amount fixed [15,19), Note's own offset-array entry
+    // [24,26) with its data at [28,34), Sentinel's entry [26,28) with data
+    // at [34,70). Row bytes 0-3 are TagA/TagB/fixedEnd - never decoded
+    // into any column.
+    private static readonly byte[] RealInsertRowForCorruptionTests = Convert.FromHexString(
+        "3000130001000000F73F6404294A0BE90300000500000200220046006E6F74652D314C50542D" +
+        "6261613163613933373934393433656361623638616237376438646365643633");
+
+    [Fact]
+    public void Decode_OffsetOverlappingAFixedColumn_FlagsOnlyThatColumn()
+    {
+        var result = RowDecoder.Decode(RealInsertRowForCorruptionTests, LogTestSchema, [15], out var corrupted);
+
+        Assert.Equal(["Amount"], corrupted);
+        Assert.Equal(1001, result["Amount"]); // still decoded - a flag isn't a refusal
+    }
+
+    [Fact]
+    public void Decode_OffsetOverlappingAVariableColumnsData_FlagsThatColumn()
+    {
+        // Byte 30 is inside Note's actual character data [28,34), not its
+        // offset-array entry.
+        var result = RowDecoder.Decode(RealInsertRowForCorruptionTests, LogTestSchema, [30], out var corrupted);
+
+        Assert.Equal(["Note"], corrupted);
+        Assert.Equal("note-1", result["Note"]);
+    }
+
+    [Fact]
+    public void Decode_OffsetOverlappingAVariableColumnsOffsetArrayEntry_FlagsThatColumn()
+    {
+        // Byte 24 is Note's own 2-byte cumulative-offset entry, not its
+        // data - this is the exact mechanism of the real bug this feature
+        // exists for (DECISION.StockDecisionDaily.DecisionFlag: the
+        // ENTRY, not the character data, was the corrupted byte - see
+        // research_notes.md). The entry's actual value here is fine (this
+        // is a synthetic offset choice against real row bytes, not a real
+        // corrupted record), so the decoded value is still correct - the
+        // point is that this position is treated as belonging to Note.
+        var result = RowDecoder.Decode(RealInsertRowForCorruptionTests, LogTestSchema, [24], out var corrupted);
+
+        Assert.Equal(["Note"], corrupted);
+        Assert.Equal("note-1", result["Note"]);
+    }
+
+    [Fact]
+    public void Decode_OffsetInRowHeaderBytes_FlagsNothing()
+    {
+        // Bytes 0-3 (TagA/TagB/fixedEnd) are never decoded into any
+        // column value - confirms the check doesn't degrade into "flag if
+        // anything anywhere in the row touched a boundary," which is
+        // exactly the over-broad signal (~94% of a real table's events)
+        // this per-column feature replaced.
+        var result = RowDecoder.Decode(RealInsertRowForCorruptionTests, LogTestSchema, [0, 1, 2, 3], out var corrupted);
+
+        Assert.Empty(corrupted);
+        Assert.Equal(1001, result["Amount"]);
+    }
+
+    [Fact]
+    public void Decode_OffsetsOverlappingTwoDifferentColumns_FlagsBoth()
+    {
+        var result = RowDecoder.Decode(RealInsertRowForCorruptionTests, LogTestSchema, [15, 30], out var corrupted);
+
+        Assert.Equal(2, corrupted.Count);
+        Assert.Contains("Amount", corrupted);
+        Assert.Contains("Note", corrupted);
+    }
+
+    [Fact]
+    public void Decode_NoPossiblyCorruptedOffsetsGiven_BehavesExactlyLikeThePlainOverload()
+    {
+        var withEmptyList = RowDecoder.Decode(RealInsertRowForCorruptionTests, LogTestSchema, [], out var corrupted);
+        var plain = RowDecoder.Decode(RealInsertRowForCorruptionTests, LogTestSchema);
+
+        Assert.Empty(corrupted);
+        Assert.Equal(plain["Amount"], withEmptyList["Amount"]);
+        Assert.Equal(plain["Note"], withEmptyList["Note"]);
+    }
+
+    // Synthetic (not a real captured row, unlike the rest of this file) -
+    // hand-built specifically to put a boundary offset inside a NULL fixed-
+    // length column's reserved-but-unread byte range. Two INT columns, no
+    // variable-length section: tagA=0x10 (null bitmap only), fixedEnd=12,
+    // Id=42 (bytes 4-7, not null), OptionalAmount's reserved bytes are
+    // 0xFFFFFFFF (bytes 8-11, deliberately garbage-looking to prove they're
+    // never actually read into the decoded value), colCount=2 (bytes
+    // 12-13), null bitmap byte 0x02 (bit1 set -> OptionalAmount is NULL).
+    private static readonly byte[] RowWithNullFixedColumn = Convert.FromHexString("10000C002A000000FFFFFFFF020002");
+
+    private static readonly IReadOnlyList<ColumnSchema> TwoIntColumnsSchema =
+    [
+        new ColumnSchema("Id", 1, LeafOffset: 4, LeafNullBit: 1, MaxLength: 4, SystemTypeId: 56),
+        new ColumnSchema("OptionalAmount", 2, LeafOffset: 8, LeafNullBit: 2, MaxLength: 4, SystemTypeId: 56),
+    ];
+
+    [Fact]
+    public void Decode_OffsetInsideANullFixedColumnsReservedBytes_DoesNotFlagIt()
+    {
+        // Regression test: a NULL fixed-length column's bytes are never
+        // read to produce its value (the null bitmap alone decides it's
+        // null) - a boundary artifact landing in that reserved range
+        // can't have corrupted anything, so flagging it would silently
+        // reintroduce a smaller-scale version of the same over-broad
+        // "flagged but nothing that mattered was actually touched"
+        // problem the whole per-column redesign exists to fix (see
+        // research_notes.md's "94%" finding, at the whole-row level
+        // instead of one column).
+        var result = RowDecoder.Decode(RowWithNullFixedColumn, TwoIntColumnsSchema, [8, 9, 10, 11], out var corrupted);
+
+        Assert.Null(result["OptionalAmount"]);
+        Assert.Empty(corrupted);
+    }
+
+    [Fact]
+    public void Decode_OffsetInsideANonNullFixedColumn_StillFlagsIt()
+    {
+        // Same row, offset inside Id's range instead (Id is NOT null) -
+        // confirms the fix above didn't accidentally suppress flagging
+        // for fixed columns in general, only genuinely-null ones.
+        var result = RowDecoder.Decode(RowWithNullFixedColumn, TwoIntColumnsSchema, [4], out var corrupted);
+
+        Assert.Equal(42, result["Id"]);
+        Assert.Equal(["Id"], corrupted);
+    }
 }
