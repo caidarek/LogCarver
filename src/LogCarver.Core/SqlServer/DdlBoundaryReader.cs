@@ -16,10 +16,28 @@ public sealed record DdlBoundary(string Lsn, string? TransactionName, string Tra
 /// same transaction also touched the table's AllocUnitName - is what makes
 /// this work for metadata-only DDL too; an AllocUnitName-based join finds
 /// zero boundaries for ADD COLUMN and silently defeats the guard.
+///
+/// hobt_id, index_id, and partitioning: sys.partitions has one row per
+/// (index, partition) - the old query here had no index_id filter at all,
+/// so any table with a secondary index (extremely common - not limited to
+/// partitioned tables) could pick that index's own hobt_id instead of the
+/// table's own heap/clustered one via ExecuteScalar's arbitrary "whichever
+/// row came back first, no ORDER BY" behavior, silently matching DDL
+/// against the wrong rowset and finding zero boundaries where real ones
+/// exist. A partitioned table compounds this: even after filtering to
+/// index_id IN (0,1) (same fix SchemaReader already applies), a table with
+/// N partitions still has N distinct hobt_ids, one per partition, and a
+/// schema-changing DDL only needs to touch ONE partition's hobt to be a
+/// real boundary. GetDdlBoundariesAsync now collects every hobt_id for the
+/// table and unions the boundaries found under each, so a DDL affecting
+/// any partition is caught, not just whichever one happened to be first.
 /// </summary>
 public static class DdlBoundaryReader
 {
-    private const string HobtIdSql = "SELECT hobt_id FROM sys.partitions WHERE object_id = OBJECT_ID(@tableName);";
+    private const string HobtIdSql = """
+        SELECT hobt_id FROM sys.partitions
+        WHERE object_id = OBJECT_ID(@tableName) AND index_id IN (0, 1);
+        """;
 
     private const string BoundarySql = """
         SELECT DISTINCT bx.[Current LSN] AS DdlLsn, bx.[Transaction Name] AS TxName, bx.[Transaction ID] AS TxId
@@ -37,32 +55,45 @@ public static class DdlBoundaryReader
     public static async Task<IReadOnlyList<DdlBoundary>> GetDdlBoundariesAsync(
         SqlConnection connection, string tableName, CancellationToken ct = default)
     {
-        long? hobtId = await GetHobtIdAsync(connection, tableName, ct);
-        if (hobtId is null) return [];
+        IReadOnlyList<long> hobtIds = await GetHobtIdsAsync(connection, tableName, ct);
+        if (hobtIds.Count == 0) return [];
 
-        await using var command = new SqlCommand(BoundarySql, connection);
-        command.Parameters.AddWithValue("@rowsetPattern", $"%rowset {hobtId.Value}.%");
-
-        var results = new List<DdlBoundary>();
-        await using var reader = await command.ExecuteReaderAsync(ct);
-        int ordLsn = reader.GetOrdinal("DdlLsn");
-        int ordName = reader.GetOrdinal("TxName");
-        int ordId = reader.GetOrdinal("TxId");
-        while (await reader.ReadAsync(ct))
+        // Merged by LSN, not just concatenated - a single DDL transaction
+        // touching multiple partitions in one statement (e.g. an
+        // ALTER TABLE ... ADD COLUMN, which is metadata-only but applies to
+        // every partition at once) would otherwise show up once per
+        // matching hobt_id.
+        var byLsn = new Dictionary<string, DdlBoundary>();
+        foreach (long hobtId in hobtIds)
         {
-            results.Add(new DdlBoundary(
-                Lsn: reader.GetString(ordLsn),
-                TransactionName: reader.IsDBNull(ordName) ? null : reader.GetString(ordName),
-                TransactionId: reader.GetString(ordId)));
+            await using var command = new SqlCommand(BoundarySql, connection);
+            command.Parameters.AddWithValue("@rowsetPattern", $"%rowset {hobtId}.%");
+
+            await using var reader = await command.ExecuteReaderAsync(ct);
+            int ordLsn = reader.GetOrdinal("DdlLsn");
+            int ordName = reader.GetOrdinal("TxName");
+            int ordId = reader.GetOrdinal("TxId");
+            while (await reader.ReadAsync(ct))
+            {
+                string lsn = reader.GetString(ordLsn);
+                byLsn[lsn] = new DdlBoundary(
+                    Lsn: lsn,
+                    TransactionName: reader.IsDBNull(ordName) ? null : reader.GetString(ordName),
+                    TransactionId: reader.GetString(ordId));
+            }
         }
-        return results;
+        return byLsn.Values.OrderBy(b => b.Lsn, StringComparer.Ordinal).ToList();
     }
 
-    private static async Task<long?> GetHobtIdAsync(SqlConnection connection, string tableName, CancellationToken ct)
+    private static async Task<IReadOnlyList<long>> GetHobtIdsAsync(SqlConnection connection, string tableName, CancellationToken ct)
     {
         await using var command = new SqlCommand(HobtIdSql, connection);
         command.Parameters.AddWithValue("@tableName", tableName);
-        var result = await command.ExecuteScalarAsync(ct);
-        return result is null or DBNull ? null : (long)result;
+
+        var hobtIds = new List<long>();
+        await using var reader = await command.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+            hobtIds.Add(reader.GetInt64(0));
+        return hobtIds;
     }
 }

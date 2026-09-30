@@ -15,6 +15,23 @@ namespace LogCarver.Core.SqlServer;
 /// one, producing bogus SystemTypeId values for columns not covered by the
 /// index - found for real on 2026-09-28 via a heap table with a
 /// PRIMARY KEY NONCLUSTERED constraint (see SchemaReaderTests).
+///
+/// Table partitioning: sys.partitions also has one row per PARTITION for a
+/// given index_id, not just one - a table with N partitions returns this
+/// entire column layout N times over (once per partition_id, all
+/// identical - a column's physical offset/type/nullability never varies
+/// by partition, only which physical partition a given ROW lives in
+/// does). Returning every one of those duplicate rows used to corrupt
+/// RowDecoder's positional variable-length-column matching downstream
+/// (schema.Where(LeafOffset &lt; 0).OrderByDescending(LeafOffset), matched
+/// index-for-index against the row's own offset array - N duplicates per
+/// column shifts that mapping and decodes wrong values, not an
+/// exception). GetTableSchemaAsync de-duplicates by ColumnId below so a
+/// partitioned table's schema still resolves correctly; the separate,
+/// harder problem of a partitioned table's actual ROW DATA living across
+/// multiple PartitionIds is handled where the row-scanning code chooses
+/// which PartitionId(s) to look for (LogCarverOffline's CaptureMetadata),
+/// not here.
 /// </summary>
 public static class SchemaReader
 {
@@ -37,19 +54,25 @@ public static class SchemaReader
         await using var command = new SqlCommand(Sql, connection);
         command.Parameters.AddWithValue("@tableName", tableName);
 
-        var results = new List<ColumnSchema>();
+        // Keyed by ColumnId, not just appended - see this class's doc
+        // comment for why a partitioned table returns the same column
+        // multiple times over, and why keeping only the first occurrence
+        // (rather than every row) is correct rather than a workaround.
+        var results = new Dictionary<int, ColumnSchema>();
         await using var reader = await command.ExecuteReaderAsync(ct);
         while (await reader.ReadAsync(ct))
         {
-            results.Add(new ColumnSchema(
+            int columnId = reader.GetInt32(reader.GetOrdinal("ColumnId"));
+            if (results.ContainsKey(columnId)) continue;
+            results[columnId] = new ColumnSchema(
                 Name: reader.GetString(reader.GetOrdinal("ColName")),
-                ColumnId: reader.GetInt32(reader.GetOrdinal("ColumnId")),
+                ColumnId: columnId,
                 LeafOffset: reader.GetInt16(reader.GetOrdinal("LeafOffset")),
                 LeafNullBit: reader.GetInt16(reader.GetOrdinal("LeafNullBit")),
                 MaxLength: reader.GetInt16(reader.GetOrdinal("MaxLength")),
                 SystemTypeId: reader.GetByte(reader.GetOrdinal("SystemTypeId")),
-                Scale: reader.GetByte(reader.GetOrdinal("Scale"))));
+                Scale: reader.GetByte(reader.GetOrdinal("Scale")));
         }
-        return results;
+        return results.Values.OrderBy(c => c.ColumnId).ToList();
     }
 }

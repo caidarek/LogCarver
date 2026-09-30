@@ -76,6 +76,58 @@ public class SchemaReaderTests(SqlServerFixture fixture)
         Assert.Equal(231, customerName.SystemTypeId); // nvarchar, not the nonclustered index's internal layout
     }
 
+    /// <summary>
+    /// Regression test for a risk flagged (but never verified) in
+    /// LogCarver_上架與金流設定紀錄.md's "還沒查證" list: sys.partitions has
+    /// one row per PARTITION too, not just per index - a table split across
+    /// N partitions returns this entire column layout N times over. Before
+    /// this fix, GetTableSchemaAsync appended every one of those duplicate
+    /// rows, which corrupted RowDecoder's positional variable-length-column
+    /// matching downstream (N duplicates per column shifts the mapping,
+    /// producing wrong decoded values - not an exception, the worst failure
+    /// mode for a forensics tool). A column's physical layout never varies
+    /// by partition (only which partition a given ROW lives in does), so
+    /// de-duplicating by ColumnId is the correct fix, not a workaround.
+    /// </summary>
+    [Fact]
+    public async Task GetTableSchemaAsync_OnAPartitionedTable_DoesNotReturnDuplicateColumns()
+    {
+        const string partitionedTable = "dbo.PartitionedTestTable";
+        await using var setup = new SqlConnection(fixture.ConnectionString);
+        await setup.OpenAsync();
+        await using (var create = new SqlCommand(
+            $"IF OBJECT_ID('{partitionedTable}') IS NOT NULL DROP TABLE {partitionedTable}; " +
+            "IF EXISTS (SELECT 1 FROM sys.partition_schemes WHERE name = 'PS_SchemaReaderTest') DROP PARTITION SCHEME PS_SchemaReaderTest; " +
+            "IF EXISTS (SELECT 1 FROM sys.partition_functions WHERE name = 'PF_SchemaReaderTest') DROP PARTITION FUNCTION PF_SchemaReaderTest; " +
+            "CREATE PARTITION FUNCTION PF_SchemaReaderTest (INT) AS RANGE LEFT FOR VALUES (10, 20); " +
+            "CREATE PARTITION SCHEME PS_SchemaReaderTest AS PARTITION PF_SchemaReaderTest ALL TO ([PRIMARY]); " +
+            $"CREATE TABLE {partitionedTable} (Id INT NOT NULL, Note VARCHAR(200)) ON PS_SchemaReaderTest(Id); " +
+            $"INSERT INTO {partitionedTable} (Id, Note) VALUES (5, 'partition-1'), (15, 'partition-2'), (25, 'partition-3');",
+            setup))
+        {
+            await create.ExecuteNonQueryAsync();
+        }
+
+        // Confirms the setup actually spans more than one partition -
+        // otherwise this test would pass for the wrong reason (a
+        // partition-scheme table SQL Server happened to keep all rows in
+        // one partition of).
+        await using (var checkPartitions = new SqlCommand(
+            $"SELECT COUNT(*) FROM sys.partitions WHERE object_id = OBJECT_ID('{partitionedTable}') AND index_id IN (0,1);", setup))
+        {
+            long partitionCount = (int)(await checkPartitions.ExecuteScalarAsync())!;
+            Assert.True(partitionCount > 1, $"test setup didn't actually create multiple partitions (got {partitionCount})");
+        }
+
+        await using var connection = new SqlConnection(fixture.ConnectionString);
+        await connection.OpenAsync();
+        var schema = await SchemaReader.GetTableSchemaAsync(connection, partitionedTable);
+
+        Assert.Equal(2, schema.Count); // Id + Note, not 2 * partition-count
+        Assert.Equal(1, schema.Count(c => c.Name == "Id"));
+        Assert.Equal(1, schema.Count(c => c.Name == "Note"));
+    }
+
     [Fact]
     public async Task GetTableSchemaAsync_UnknownTable_ReturnsEmpty()
     {
