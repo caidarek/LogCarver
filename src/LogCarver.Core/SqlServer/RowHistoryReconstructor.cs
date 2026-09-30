@@ -29,6 +29,17 @@ public sealed record RowEvent(
 /// </summary>
 public static class RowHistoryReconstructor
 {
+    /// <summary>
+    /// Appended to Note whenever a record (or, for an UPDATE, its known
+    /// before-image) was flagged PossiblyCorrupted - see LogRecord's doc
+    /// comment. This does not mean decoding failed (the values shown may
+    /// well be exactly right); it means at least one byte in this record's
+    /// physical range is known to be unreliable and nothing here can tell
+    /// which one, if any, actually mattered.
+    /// </summary>
+    internal const string CorruptionNote =
+        "this record's bytes cross a 512-byte log block boundary offline scanning doesn't yet reconstruct - some byte in it may be wrong; verify independently before relying on this value";
+
     public static IReadOnlyList<RowEvent> Reconstruct(
         IEnumerable<LogRecord> recordsInLsnOrder,
         IReadOnlyList<ColumnSchema> schema,
@@ -42,14 +53,21 @@ public static class RowHistoryReconstructor
                 ? t
                 : null;
 
-        // Per physical slot: the most recently known row image and the LSN
-        // it was actually written at. The write LSN - not the LSN of
-        // whatever record we're currently looking at - is what the
-        // schema-drift guard must check: a row untouched since before a
-        // metadata-only DDL (e.g. ADD COLUMN) is still physically in the
-        // old layout even if we're now looking at it from a later point
-        // in the log.
-        var state = new Dictionary<(string PageId, int SlotId), (byte[] Bytes, string WrittenAtLsn)>();
+        // Per physical slot: the most recently known row image, the LSN it
+        // was actually written at, and whether that image came from a
+        // record LogCarverOffline flagged PossiblyCorrupted (see
+        // LogRecord's doc comment) - a corrupt base image taints every
+        // future UPDATE spliced onto it, not just the record it came from.
+        // The write LSN - not the LSN of whatever record we're currently
+        // looking at - is what the schema-drift guard must check: a row
+        // untouched since before a metadata-only DDL (e.g. ADD COLUMN) is
+        // still physically in the old layout even if we're now looking at
+        // it from a later point in the log.
+        var state = new Dictionary<(string PageId, int SlotId), (byte[] Bytes, string WrittenAtLsn, bool PossiblyCorrupted)>();
+
+        static string? WithCorruptionNote(string? note, bool possiblyCorrupted) => possiblyCorrupted
+            ? (note is null ? CorruptionNote : $"{note}; {CorruptionNote}")
+            : note;
 
         foreach (var record in recordsInLsnOrder)
         {
@@ -61,14 +79,16 @@ public static class RowHistoryReconstructor
                 case "LOP_INSERT_ROWS" when record.RowLogContents0 is { Length: > 0 } bytes:
                     {
                         var decoded = TryDecode(bytes, schema, record.Lsn, ddlBoundaryLsns, out var note);
+                        note = WithCorruptionNote(note, record.PossiblyCorrupted);
                         events.Add(new RowEvent(record.Lsn, RowEventKind.Insert, null, decoded, note, TimestampOf(record), record.PageId, record.SlotId.Value));
-                        state[key] = (bytes, record.Lsn);
+                        state[key] = (bytes, record.Lsn, record.PossiblyCorrupted);
                         break;
                     }
 
                 case "LOP_DELETE_ROWS" when record.RowLogContents0 is { Length: > 0 } bytes:
                     {
                         var decoded = TryDecode(bytes, schema, record.Lsn, ddlBoundaryLsns, out var note);
+                        note = WithCorruptionNote(note, record.PossiblyCorrupted);
                         events.Add(new RowEvent(record.Lsn, RowEventKind.Delete, decoded, null, note, TimestampOf(record), record.PageId, record.SlotId.Value));
                         state.Remove(key);
                         break;
@@ -106,14 +126,16 @@ public static class RowHistoryReconstructor
                             record.RowLogContents1 is not { } rlc1)
                         {
                             events.Add(new RowEvent(record.Lsn, RowEventKind.Update, null, null,
-                                "diff not available (missing offset or RowLog Contents)", TimestampOf(record), record.PageId, record.SlotId.Value));
+                                WithCorruptionNote("diff not available (missing offset or RowLog Contents)", record.PossiblyCorrupted),
+                                TimestampOf(record), record.PageId, record.SlotId.Value));
                             break;
                         }
 
                         if (!state.TryGetValue(key, out var before))
                         {
                             events.Add(new RowEvent(record.Lsn, RowEventKind.Update, null, null,
-                                "before image unknown - this row's insert (or a prior update) is outside the observed log window", TimestampOf(record), record.PageId, record.SlotId.Value));
+                                WithCorruptionNote("before image unknown - this row's insert (or a prior update) is outside the observed log window", record.PossiblyCorrupted),
+                                TimestampOf(record), record.PageId, record.SlotId.Value));
                             break;
                         }
 
@@ -124,15 +146,23 @@ public static class RowHistoryReconstructor
                         }
                         catch (Exception ex) when (ex is ArgumentOutOfRangeException or IndexOutOfRangeException)
                         {
+                            // A corrupted byte in either image is a very
+                            // plausible cause of exactly this failure (a
+                            // byte-range splice that no longer lines up) -
+                            // surface both images' flags, not just the
+                            // current record's.
                             events.Add(new RowEvent(record.Lsn, RowEventKind.Update, null, null,
-                                $"patch failed - before image and this diff do not line up ({ex.Message})", TimestampOf(record), record.PageId, record.SlotId.Value));
+                                WithCorruptionNote($"patch failed - before image and this diff do not line up ({ex.Message})", before.PossiblyCorrupted || record.PossiblyCorrupted),
+                                TimestampOf(record), record.PageId, record.SlotId.Value));
                             break;
                         }
 
                         var beforeDecoded = TryDecode(before.Bytes, schema, before.WrittenAtLsn, ddlBoundaryLsns, out var beforeNote);
                         var afterDecoded = TryDecode(afterBytes, schema, record.Lsn, ddlBoundaryLsns, out var afterNote);
-                        events.Add(new RowEvent(record.Lsn, RowEventKind.Update, beforeDecoded, afterDecoded, beforeNote ?? afterNote, TimestampOf(record), record.PageId, record.SlotId.Value));
-                        state[key] = (afterBytes, record.Lsn);
+                        bool possiblyCorrupted = before.PossiblyCorrupted || record.PossiblyCorrupted;
+                        string? note = WithCorruptionNote(beforeNote ?? afterNote, possiblyCorrupted);
+                        events.Add(new RowEvent(record.Lsn, RowEventKind.Update, beforeDecoded, afterDecoded, note, TimestampOf(record), record.PageId, record.SlotId.Value));
+                        state[key] = (afterBytes, record.Lsn, possiblyCorrupted);
                         break;
                     }
             }

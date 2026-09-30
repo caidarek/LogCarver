@@ -141,6 +141,22 @@ public class RowEventExporterTests
     }
 
     [Fact]
+    public void ToSql_EventWithANoteThatStillProducedSql_PrintsTheNoteInTheComment()
+    {
+        // A Note here isn't a decode failure (those events never produce
+        // Undo/Replay SQL at all, so they never reach this branch) - it's
+        // a successfully-decoded value the reconstructor flagged as not
+        // fully trustworthy (e.g. LogRecord.PossiblyCorrupted). Without
+        // this line in the exported script, a customer reviewing it would
+        // have no way to know this specific statement might be wrong.
+        var events = new[] { MakeEvent(RowEventKind.Insert, null, Row(5, "hello"), note: "possibly corrupted, verify independently") };
+
+        string sql = RowEventExporter.ToSql(events, "dbo.Orders", includeUndoSql: true, includeReplaySql: false);
+
+        Assert.Contains("-- NOTE: possibly corrupted, verify independently", sql);
+    }
+
+    [Fact]
     public void ToJson_RoundTripsKindAsUppercaseStringAndPreservesColumnValues()
     {
         var events = new[] { MakeEvent(RowEventKind.Update, Row(5, "old"), Row(5, "new")) };

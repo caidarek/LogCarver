@@ -22,14 +22,14 @@ public class RowHistoryReconstructorTests
     private static readonly byte[] Rlc0 = Convert.FromHexString("E903"); // Amount 1001
     private static readonly byte[] Rlc1 = Convert.FromHexString("2923"); // Amount 9001
 
-    private static LogRecord Insert(string lsn, string pageId, int slotId, byte[] bytes) =>
-        new(lsn, "LOP_INSERT_ROWS", "LCX_CLUSTERED", null, "dbo.LogTest.pk", pageId, slotId, null, bytes, null);
+    private static LogRecord Insert(string lsn, string pageId, int slotId, byte[] bytes, bool possiblyCorrupted = false) =>
+        new(lsn, "LOP_INSERT_ROWS", "LCX_CLUSTERED", null, "dbo.LogTest.pk", pageId, slotId, null, bytes, null, possiblyCorrupted);
 
-    private static LogRecord Delete(string lsn, string pageId, int slotId, byte[] bytes) =>
-        new(lsn, "LOP_DELETE_ROWS", "LCX_MARK_AS_GHOST", null, "dbo.LogTest.pk", pageId, slotId, null, bytes, null);
+    private static LogRecord Delete(string lsn, string pageId, int slotId, byte[] bytes, bool possiblyCorrupted = false) =>
+        new(lsn, "LOP_DELETE_ROWS", "LCX_MARK_AS_GHOST", null, "dbo.LogTest.pk", pageId, slotId, null, bytes, null, possiblyCorrupted);
 
-    private static LogRecord Update(string lsn, string pageId, int slotId, int offset, byte[] rlc0, byte[] rlc1) =>
-        new(lsn, "LOP_MODIFY_ROW", "LCX_CLUSTERED", offset, "dbo.LogTest.pk", pageId, slotId, null, rlc0, rlc1);
+    private static LogRecord Update(string lsn, string pageId, int slotId, int offset, byte[] rlc0, byte[] rlc1, bool possiblyCorrupted = false) =>
+        new(lsn, "LOP_MODIFY_ROW", "LCX_CLUSTERED", offset, "dbo.LogTest.pk", pageId, slotId, null, rlc0, rlc1, possiblyCorrupted);
 
     // Real captured LOP_MODIFY_COLUMNS RowLogContents0/1 (a column-level
     // change descriptor, NOT a byte-range splice - see the operation's own
@@ -143,5 +143,56 @@ public class RowHistoryReconstructorTests
         Assert.Null(laterUpdate.Before);
         Assert.Null(laterUpdate.After);
         Assert.Contains("before image unknown", laterUpdate.Note);
+    }
+
+    [Fact]
+    public void PossiblyCorruptedInsert_StillDecodes_ButNoteFlagsIt()
+    {
+        // LogRecord.PossiblyCorrupted (set by an offline reader when a
+        // record's bytes crossed a physical artifact it detected but
+        // can't repair - see LogCarverOffline's PartitionScanner) must not
+        // block decoding: the values may well be exactly right, this is
+        // an honesty flag, not a refusal.
+        LogRecord[] records = [Insert("00000001", "0001:0F", 3, InsertRow, possiblyCorrupted: true)];
+
+        var history = RowHistoryReconstructor.Reconstruct(records, LogTestSchema, ddlBoundaryLsns: []);
+
+        Assert.Single(history);
+        Assert.Equal(1001, history[0].After!["Amount"]); // still decoded normally
+        Assert.Contains("512-byte log block boundary", history[0].Note);
+    }
+
+    [Fact]
+    public void PossiblyCorruptedInsert_TaintsALaterUpdateSplicedOntoIt()
+    {
+        // The corruption flag must survive in `state` across records - an
+        // UPDATE spliced onto a flagged base image is built from bytes
+        // that were never confirmed reliable, even though the UPDATE's
+        // own record is perfectly fine.
+        LogRecord[] records =
+        [
+            Insert("00000001", "0001:0F", 3, InsertRow, possiblyCorrupted: true),
+            Update("00000002", "0001:0F", 3, offset: 15, Rlc0, Rlc1, possiblyCorrupted: false),
+        ];
+
+        var history = RowHistoryReconstructor.Reconstruct(records, LogTestSchema, ddlBoundaryLsns: []);
+
+        var update = history[1];
+        Assert.Equal(9001, update.After!["Amount"]); // still decodes
+        Assert.Contains("512-byte log block boundary", update.Note);
+    }
+
+    [Fact]
+    public void PossiblyCorruptedUpdate_OnAnUntaintedBase_IsStillFlagged()
+    {
+        LogRecord[] records =
+        [
+            Insert("00000001", "0001:0F", 3, InsertRow, possiblyCorrupted: false),
+            Update("00000002", "0001:0F", 3, offset: 15, Rlc0, Rlc1, possiblyCorrupted: true),
+        ];
+
+        var history = RowHistoryReconstructor.Reconstruct(records, LogTestSchema, ddlBoundaryLsns: []);
+
+        Assert.Contains("512-byte log block boundary", history[1].Note);
     }
 }

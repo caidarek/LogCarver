@@ -135,6 +135,15 @@ public static class RowEventExporter
             string when = e.Timestamp?.ToString("yyyy-MM-dd HH:mm:ss.fff", CultureInfo.InvariantCulture) ?? "time unknown";
             writer.Write($"-- [{e.Lsn} {when}] {e.Kind.ToString().ToUpperInvariant()}");
             writer.Write('\n');
+            // A Note on an event that still produced Undo/Replay SQL isn't
+            // a decode failure (those events never reach here at all - see
+            // the undoSql/replaySql null check above) - it's a
+            // successfully-decoded value the reconstructor still isn't
+            // fully confident in (currently: PossiblyCorrupted, see
+            // LogRecord's doc comment). Without this line, a customer
+            // reviewing the generated script would have no way to know
+            // this specific statement might be wrong.
+            if (e.Note is not null) { writer.Write($"-- NOTE: {e.Note}"); writer.Write('\n'); }
             if (undoSql is not null) { writer.Write("-- UNDO\n"); writer.Write(undoSql); writer.Write('\n'); }
             if (replaySql is not null) { writer.Write("-- REPLAY\n"); writer.Write(replaySql); writer.Write('\n'); }
             writer.Write('\n');
