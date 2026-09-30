@@ -130,4 +130,22 @@ public class UndoSqlGeneratorTests
 
         Assert.Equal("DELETE FROM [dbo].[Orders] WHERE [JobId] = 5000000000 AND [Status] = N'RUNNING';", sql);
     }
+
+    [Fact]
+    public void TableNameAlreadyBracketQuoted_IsNotDoubleEscaped()
+    {
+        // Regression test for a real bug found via customer testing on
+        // 2026-09-30: the CLI's tableName argument is whatever the caller
+        // typed, and typing "[LOG].[JobRun]" is completely ordinary -
+        // exactly what SSMS's own "Script Table as" produces. Re-escaping
+        // an already-bracketed name without accounting for that doubled
+        // every bracket: EscapeIdentifier turned "[LOG].[JobRun]" into
+        // "[[LOG]]].[[JobRun]]]" - syntactically broken SQL a customer
+        // could not have run as-is.
+        var evt = MakeEvent(RowEventKind.Insert, null, Row(5, "hello", 100));
+
+        var sql = UndoSqlGenerator.Generate(evt, "[LOG].[JobRun]");
+
+        Assert.Equal("DELETE FROM [LOG].[JobRun] WHERE [Id] = 5 AND [Note] = N'hello' AND [Amount] = 100;", sql);
+    }
 }

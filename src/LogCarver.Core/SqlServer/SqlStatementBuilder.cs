@@ -47,8 +47,25 @@ internal static class SqlStatementBuilder
     // executed by LogCarver itself - an unescaped identifier would let such
     // a column name inject extra statements into what looks like a plain
     // suggestion.
+    //
+    // The table name specifically can arrive here ALREADY bracket-quoted -
+    // the CLI's tableName argument is whatever the caller typed, and typing
+    // "[dbo].[Orders]" is completely ordinary (it's exactly what SSMS's own
+    // "Script Table as" produces). Re-escaping an already-bracketed part
+    // without accounting for that doubled every bracket - "[dbo].[Orders]"
+    // came out as "[[dbo]]].[[Orders]]]", found via real customer testing
+    // 2026-09-30. Stripping one pre-existing layer of brackets (and
+    // reversing their "]]" -> "]" escaping) before re-escaping makes this
+    // idempotent: an already-bracketed part round-trips to the same
+    // brackets, and an unbracketed part is escaped exactly as before.
     private static string EscapeIdentifier(string name) =>
-        string.Join(".", name.Split('.').Select(part => $"[{part.Replace("]", "]]")}]"));
+        string.Join(".", name.Split('.').Select(part =>
+        {
+            string raw = part.Length >= 2 && part[0] == '[' && part[^1] == ']'
+                ? part[1..^1].Replace("]]", "]")
+                : part;
+            return $"[{raw.Replace("]", "]]")}]";
+        }));
 
     private static string FormatSqlLiteral(object? value) => value switch
     {
