@@ -148,9 +148,40 @@ public static class RowDecoder
                 (possiblyCorruptedColumns ??= []).Add(columnName);
         }
 
+        // colCount/nullBitmapStart only need fixedEnd (read directly from
+        // the row's own header bytes above) - never any fixed column's
+        // decoded value - so they're safe to compute before touching any
+        // column, which is what makes the null check below possible.
+        int colCount = ReadUInt16LE(row, fixedEnd);
+        int nullBitmapBytes = (colCount + 7) / 8;
+        int nullBitmapStart = fixedEnd + 2;
+        int afterNullBitmap = nullBitmapStart + nullBitmapBytes;
+
+        // Null check happens BEFORE decoding, not after (2026-09-30 fix - a
+        // real customer row crashed here): a NULL fixed-length column's
+        // bytes are reserved but meaningless, and an earlier version of
+        // this loop decoded every fixed column unconditionally, then
+        // overwrote NULL ones with null afterward - reasoning that garbage
+        // bytes decoded into a value nobody keeps is harmless. That holds
+        // for TypeInt/TypeBigInt (BitConverter never throws on any bit
+        // pattern) but not for TypeDateTime2: DecodeDateTime2 calls
+        // DateTime.AddDays on whatever day-count the garbage bytes happen
+        // to contain, which threw ArgumentOutOfRangeException for a real
+        // NULL EndTime column ([LOG].[JobRun]) whose reserved bytes decoded
+        // to a day count outside DateTime's valid range - crashing the
+        // entire row (every other column lost too) before the null
+        // overwrite below ever ran. Checking null first and skipping the
+        // decode switch entirely for a NULL column closes this for every
+        // current and future fixed-length type, not just DATETIME2.
         foreach (var col in schema)
         {
             if (col.LeafOffset < 0) continue;
+            bool isNull = IsColNull(row, nullBitmapStart, col.LeafNullBit);
+            if (isNull)
+            {
+                result[col.Name] = null;
+                continue;
+            }
             result[col.Name] = col.SystemTypeId switch
             {
                 TypeInt => BitConverter.ToInt32(row.Slice(col.LeafOffset, 4)),
@@ -167,34 +198,15 @@ public static class RowDecoder
                 _ => throw new NotSupportedException(
                     $"Column '{col.Name}': system_type_id {col.SystemTypeId} is not implemented yet."),
             };
-        }
-
-        int colCount = ReadUInt16LE(row, fixedEnd);
-        int nullBitmapBytes = (colCount + 7) / 8;
-        int nullBitmapStart = fixedEnd + 2;
-        int afterNullBitmap = nullBitmapStart + nullBitmapBytes;
-
-        // Fixed-length columns: bytes were decoded above regardless of
-        // null-ness (a NULL fixed-length column's bytes are meaningless),
-        // now overwrite with null where the bitmap says so. The overlap
-        // check has to live here too, not in the decode loop above - a
-        // NULL column's reserved bytes are never actually read to produce
-        // its value, so a boundary artifact landing there can't have
-        // corrupted anything; flagging it anyway would silently
-        // reintroduce a smaller-scale version of the same over-broad
-        // "flagged but nothing decoded from these bytes actually mattered"
-        // problem the per-column redesign exists to eliminate (see
-        // research_notes.md's "94%" finding, which was at the whole-row
-        // level instead of one column).
-        foreach (var col in schema)
-        {
-            if (col.LeafOffset < 0) continue;
-            bool isNull = IsColNull(row, nullBitmapStart, col.LeafNullBit);
-            if (isNull)
-            {
-                result[col.Name] = null;
-                continue;
-            }
+            // The overlap check stays gated on non-null too - a NULL
+            // column's reserved bytes are never actually read to produce
+            // its value (we just skipped decoding them above), so a
+            // boundary artifact landing there can't have corrupted
+            // anything; flagging it anyway would reintroduce a smaller-
+            // scale version of the same over-broad "flagged but nothing
+            // that mattered was actually touched" problem the per-column
+            // redesign exists to eliminate (see research_notes.md's "94%"
+            // finding, at the whole-row level instead of one column).
             // TypeInt is always 4 bytes, TypeBigInt always 8, and TypeDate
             // always 3, regardless of the schema's own declared MaxLength
             // for any of them (none ever varies) - every other fixed-length

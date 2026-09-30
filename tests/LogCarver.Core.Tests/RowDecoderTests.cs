@@ -580,4 +580,51 @@ public class RowDecoderTests
 
         Assert.Equal(5_000_000_000L, result["JobId"]);
     }
+
+    // dbo/[LOG].[JobRun]: JobID BIGINT, JobName VARCHAR(100), StartTime
+    // DATETIME2(7), EndTime DATETIME2(7) NULL, Status VARCHAR(20),
+    // CreateDate DATETIME2(7). Real RowLog Contents 0 captured against a
+    // real customer's SQL Server for an INSERT of (1, "1", 2026-09-09
+    // 00:00:00.0000000, NULL, "RUNNING", 2026-09-30 20:19:45.3810173),
+    // cross-checked byte-for-byte by hand before being used as this
+    // regression's ground truth.
+    private static readonly IReadOnlyList<ColumnSchema> JobRunSchema =
+    [
+        new ColumnSchema("JobID", 1, LeafOffset: 4, LeafNullBit: 1, MaxLength: 8, SystemTypeId: 127),
+        new ColumnSchema("JobName", 2, LeafOffset: -1, LeafNullBit: 2, MaxLength: 100, SystemTypeId: 167),
+        new ColumnSchema("StartTime", 3, LeafOffset: 12, LeafNullBit: 3, MaxLength: 8, SystemTypeId: 42, Scale: 7),
+        new ColumnSchema("EndTime", 4, LeafOffset: 20, LeafNullBit: 4, MaxLength: 8, SystemTypeId: 42, Scale: 7),
+        new ColumnSchema("Status", 5, LeafOffset: -2, LeafNullBit: 5, MaxLength: 20, SystemTypeId: 167),
+        new ColumnSchema("CreateDate", 6, LeafOffset: 28, LeafNullBit: 6, MaxLength: 8, SystemTypeId: 42, Scale: 7),
+    ];
+
+    [Fact]
+    public void Decode_NullDateTime2FixedColumn_DoesNotCrashTheWholeRow()
+    {
+        // Regression test for a real gap found via customer testing on
+        // 2026-09-30, immediately after the BigInt fix above let decoding
+        // get this far: a NULL fixed-length column's reserved bytes used
+        // to be decoded unconditionally (then overwritten with null
+        // afterward) - harmless for TypeInt/TypeBigInt (BitConverter never
+        // throws on any bit pattern), but DecodeDateTime2 calls
+        // DateTime.AddDays on whatever day-count those reserved bytes
+        // happen to contain. This row's real, actual EndTime=NULL column
+        // reserved bytes decoded to a day count outside DateTime's valid
+        // range, throwing ArgumentOutOfRangeException and losing every
+        // other column in the row - misreported to the customer as "likely
+        // a compressed row" (the decoder's generic fallback for any
+        // indexing/range exception), which was flatly wrong: the table has
+        // no compression at all, confirmed via sys.partitions.
+        byte[] row = Convert.FromHexString(
+            "30002400010000000000000000000000001B4A0B5702000000FC663FFDE9E265AA304A0B06000802002E0035003152554E4E494E47");
+
+        var result = RowDecoder.Decode(row, JobRunSchema);
+
+        Assert.Equal(1L, result["JobID"]);
+        Assert.Equal("1", result["JobName"]);
+        Assert.Equal(new DateTime(2026, 9, 9, 0, 0, 0), result["StartTime"]);
+        Assert.Null(result["EndTime"]);
+        Assert.Equal("RUNNING", result["Status"]);
+        Assert.Equal(new DateTime(2026, 9, 30, 20, 19, 45, 381), ((DateTime)result["CreateDate"]!), TimeSpan.FromMilliseconds(1));
+    }
 }
