@@ -125,5 +125,22 @@ public class SnapshotBuilderTests
         var row = Assert.Single(result.Rows);
         Assert.Null(row.Values);
         Assert.NotNull(row.Note);
+        // --snapshot is its own console output surface (SnapshotRow, not
+        // RowEvent) - the "obviously flag a row a human needs to check"
+        // requirement has to be verified here independently, not assumed
+        // to follow from RowEvent.NeedsManualReview.
+        Assert.True(row.NeedsManualReview);
+    }
+
+    [Fact]
+    public void CleanlyDecodedRow_DoesNotNeedManualReview()
+    {
+        var history = new[] { MakeEvent("l1", RowEventKind.Insert, null, Row(1, "a"), T0) };
+
+        var result = SnapshotBuilder.BuildSnapshot(history, asOf: T0.AddMinutes(5));
+
+        var row = Assert.Single(result.Rows);
+        Assert.Null(row.Note);
+        Assert.False(row.NeedsManualReview);
     }
 }

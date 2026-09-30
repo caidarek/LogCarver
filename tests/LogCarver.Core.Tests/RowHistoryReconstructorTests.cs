@@ -71,6 +71,9 @@ public class RowHistoryReconstructorTests
         Assert.Equal(1001, update.Before!["Amount"]);
         Assert.Equal(9001, update.After!["Amount"]);
         Assert.Equal("note-1", update.After!["Note"]); // untouched column carried through correctly
+
+        Assert.False(history[0].NeedsManualReview); // clean insert, nothing to review
+        Assert.False(update.NeedsManualReview); // clean update, nothing to review
     }
 
     [Fact]
@@ -170,6 +173,12 @@ public class RowHistoryReconstructorTests
         Assert.Single(history);
         Assert.Equal(1001, history[0].After!["Amount"]); // still decoded normally
         Assert.Contains("512-byte log block boundary", history[0].Note);
+        // The honesty flag must reach every output surface (console/CSV/SQL/
+        // JSON) as an obvious "a human needs to look at this" signal, not
+        // just live in the free-text Note a reviewer could skim past - see
+        // RowEvent.NeedsManualReview and RowEventExporter's NeedsManualReview
+        // column/field/comment-prefix.
+        Assert.True(history[0].NeedsManualReview);
     }
 
     [Fact]

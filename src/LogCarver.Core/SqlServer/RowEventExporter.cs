@@ -80,6 +80,16 @@ public static class RowEventExporter
         header.Add("Note");
         if (includeUndoSql) header.Add("UndoSql");
         if (includeReplaySql) header.Add("ReplaySql");
+        // Appended last, after every pre-existing column, not inserted
+        // after Kind - this format already ships to paying customers, and
+        // a customer/script reading columns by position (rather than by
+        // header name) would silently misread every column if a new one
+        // were spliced into the middle. Appending only adds a column past
+        // whatever a positional reader already expects; it never shifts
+        // one that already existed. A reviewer scanning by eye/AutoFilter
+        // in Excel finds it fine regardless of position, since it's a
+        // named column with a highly distinctive header either way.
+        header.Add("NeedsManualReview");
 
         writer.Write(string.Join(",", header.Select(CsvEscape)));
         writer.Write("\r\n");
@@ -97,6 +107,7 @@ public static class RowEventExporter
             row.Add(e.Note ?? "");
             if (includeUndoSql) row.Add(UndoSqlGenerator.Generate(e, tableName) ?? "");
             if (includeReplaySql) row.Add(ReplaySqlGenerator.Generate(e, tableName) ?? "");
+            row.Add(e.NeedsManualReview ? "YES" : "");
             writer.Write(string.Join(",", row.Select(CsvEscape)));
             writer.Write("\r\n");
         }
@@ -142,10 +153,13 @@ public static class RowEventExporter
             // fully confident in (currently: a record whose bytes crossed a
             // detected-but-unrepairable physical artifact - see LogRecord's
             // PossiblyCorruptedOffsetsInRowLogContents0/1 doc comment).
-            // Without this line, a customer reviewing the generated script
-            // would have no way to know this specific statement might be
-            // wrong.
-            if (e.Note is not null) { writer.Write($"-- NOTE: {e.Note}"); writer.Write('\n'); }
+            // The "NEEDS MANUAL REVIEW" prefix (not just "NOTE") is
+            // deliberate: a customer skimming a multi-thousand-line script
+            // for comment lines should be able to tell at a glance which
+            // ones mean "just FYI" and which mean "verify this statement
+            // before running it" - e.Note is only ever non-null for the
+            // latter (see RowEvent.NeedsManualReview).
+            if (e.Note is not null) { writer.Write($"-- NEEDS MANUAL REVIEW: {e.Note}"); writer.Write('\n'); }
             if (undoSql is not null) { writer.Write("-- UNDO\n"); writer.Write(undoSql); writer.Write('\n'); }
             if (replaySql is not null) { writer.Write("-- REPLAY\n"); writer.Write(replaySql); writer.Write('\n'); }
             writer.Write('\n');
@@ -185,6 +199,7 @@ public static class RowEventExporter
                 ["Lsn"] = e.Lsn,
                 ["Timestamp"] = e.Timestamp is { } t ? JsonValue.Create(t) : null,
                 ["Kind"] = e.Kind.ToString().ToUpperInvariant(),
+                ["NeedsManualReview"] = JsonValue.Create(e.NeedsManualReview),
                 ["Before"] = ToJsonObject(e.Before),
                 ["After"] = ToJsonObject(e.After),
                 ["Note"] = e.Note,

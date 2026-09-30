@@ -27,8 +27,8 @@ public class RowEventExporterTests
         string csv = RowEventExporter.ToCsv(events, Schema, "dbo.Orders", includeUndoSql: false, includeReplaySql: false);
         var lines = csv.Split("\r\n", StringSplitOptions.RemoveEmptyEntries);
 
-        Assert.Equal("Lsn,Timestamp,Kind,Before_Id,Before_Note,After_Id,After_Note,Note", lines[0]);
-        Assert.Equal("0001:0002:0003,2026-09-28 12:00:00.500,INSERT,,,5,hello,", lines[1]);
+        Assert.Equal("Lsn,Timestamp,Kind,Before_Id,Before_Note,After_Id,After_Note,Note,NeedsManualReview", lines[0]);
+        Assert.Equal("0001:0002:0003,2026-09-28 12:00:00.500,INSERT,,,5,hello,,", lines[1]);
     }
 
     [Fact]
@@ -50,7 +50,29 @@ public class RowEventExporterTests
         string csv = RowEventExporter.ToCsv(events, Schema, "dbo.Orders", includeUndoSql: false, includeReplaySql: false);
         var lines = csv.Split("\r\n", StringSplitOptions.RemoveEmptyEntries);
 
-        Assert.EndsWith(",5,,", lines[1]); // After_Id=5, After_Note=(empty), Note=(empty)
+        Assert.EndsWith(",5,,,", lines[1]); // After_Id=5, After_Note=(empty), Note=(empty), NeedsManualReview=(empty)
+    }
+
+    [Fact]
+    public void ToCsv_EventWithANote_HasYesInNeedsManualReviewColumn()
+    {
+        var events = new[] { MakeEvent(RowEventKind.Insert, null, Row(5, "hello"), note: "crosses a 512-byte boundary") };
+
+        string csv = RowEventExporter.ToCsv(events, Schema, "dbo.Orders", includeUndoSql: false, includeReplaySql: false);
+        var lines = csv.Split("\r\n", StringSplitOptions.RemoveEmptyEntries);
+
+        Assert.Equal("0001:0002:0003,2026-09-28 12:00:00.500,INSERT,,,5,hello,crosses a 512-byte boundary,YES", lines[1]);
+    }
+
+    [Fact]
+    public void ToCsv_EventWithNoNote_HasEmptyNeedsManualReviewColumn()
+    {
+        var events = new[] { MakeEvent(RowEventKind.Insert, null, Row(5, "hello")) };
+
+        string csv = RowEventExporter.ToCsv(events, Schema, "dbo.Orders", includeUndoSql: false, includeReplaySql: false);
+        var lines = csv.Split("\r\n", StringSplitOptions.RemoveEmptyEntries);
+
+        Assert.Equal("0001:0002:0003,2026-09-28 12:00:00.500,INSERT,,,5,hello,,", lines[1]);
     }
 
     [Fact]
@@ -153,7 +175,7 @@ public class RowEventExporterTests
 
         string sql = RowEventExporter.ToSql(events, "dbo.Orders", includeUndoSql: true, includeReplaySql: false);
 
-        Assert.Contains("-- NOTE: possibly corrupted, verify independently", sql);
+        Assert.Contains("-- NEEDS MANUAL REVIEW: possibly corrupted, verify independently", sql);
     }
 
     [Fact]
@@ -169,6 +191,30 @@ public class RowEventExporterTests
         Assert.Equal("0001:0002:0003", first.GetProperty("Lsn").GetString());
         Assert.Equal(5, first.GetProperty("Before").GetProperty("Id").GetInt32());
         Assert.Equal("new", first.GetProperty("After").GetProperty("Note").GetString());
+    }
+
+    [Fact]
+    public void ToJson_EventWithANote_HasNeedsManualReviewTrue()
+    {
+        var events = new[] { MakeEvent(RowEventKind.Insert, null, Row(5, "hello"), note: "crosses a 512-byte boundary") };
+
+        string json = RowEventExporter.ToJson(events, "dbo.Orders", includeUndoSql: false, includeReplaySql: false);
+        using var doc = JsonDocument.Parse(json);
+        var first = doc.RootElement[0];
+
+        Assert.True(first.GetProperty("NeedsManualReview").GetBoolean());
+    }
+
+    [Fact]
+    public void ToJson_EventWithNoNote_HasNeedsManualReviewFalse()
+    {
+        var events = new[] { MakeEvent(RowEventKind.Insert, null, Row(5, "hello")) };
+
+        string json = RowEventExporter.ToJson(events, "dbo.Orders", includeUndoSql: false, includeReplaySql: false);
+        using var doc = JsonDocument.Parse(json);
+        var first = doc.RootElement[0];
+
+        Assert.False(first.GetProperty("NeedsManualReview").GetBoolean());
     }
 
     [Fact]

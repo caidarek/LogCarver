@@ -249,13 +249,17 @@ static async Task<int> RunAsync(string server, string database, string tableName
             Console.WriteLine(
                 $"Note: {snapshot.EventsWithUnresolvedTimestampIgnored} event(s) with no resolvable timestamp were ignored " +
                 "and could not be placed in time - the snapshot may be missing their effect.");
+        int snapshotNeedsReview = snapshot.Rows.Count(row => row.NeedsManualReview);
+        if (snapshotNeedsReview > 0)
+            Console.WriteLine(
+                $"{snapshotNeedsReview} of {snapshot.Rows.Count} row(s) ({(double)snapshotNeedsReview / snapshot.Rows.Count:P0}) are flagged NEEDS MANUAL REVIEW below.");
         Console.WriteLine();
 
         foreach (var row in snapshot.Rows)
         {
             if (row.Values is null)
             {
-                Console.WriteLine($"[{row.PageId}:{row.SlotId}] not shown - {row.Note}");
+                Console.WriteLine($"[{row.PageId}:{row.SlotId}] NEEDS MANUAL REVIEW - not shown - {row.Note}");
                 continue;
             }
             Console.WriteLine($"[{row.PageId}:{row.SlotId}] {Format(row.Values)}");
@@ -291,14 +295,26 @@ static async Task<int> RunAsync(string server, string database, string tableName
                 RowEventExporter.WriteJson(writer, toShow, tableName, options.ShowUndoSql, options.ShowReplaySql);
         }
 
+        int needsReviewCount = toShow.Count(e => e.NeedsManualReview);
+        string? reviewSummary = needsReviewCount > 0
+            ? $"{needsReviewCount} of {toShow.Count} event(s) ({(double)needsReviewCount / toShow.Count:P0}) are flagged NeedsManualReview - " +
+              "see that column/field and its Note before relying on those specific rows."
+            : null;
+
         if (options.OutputPath is not null)
         {
             RowEventExporter.WriteFileAtomically<object?>(options.OutputPath, writer => { WriteTo(writer); return null; });
             Console.WriteLine($"Wrote {toShow.Count} row event(s) for {tableName} to {options.OutputPath}.");
+            if (reviewSummary is not null) Console.WriteLine(reviewSummary);
         }
         else
         {
             WriteTo(Console.Out);
+            // The export itself just went to stdout, most likely piped
+            // onward (e.g. `--export csv > file.csv`) - printing the
+            // summary there too would corrupt that data. stderr carries it
+            // without touching the piped stream.
+            if (reviewSummary is not null) Console.Error.WriteLine(reviewSummary);
         }
         return 0;
     }
@@ -316,6 +332,12 @@ static async Task<int> RunAsync(string server, string database, string tableName
         Console.WriteLine($"{toShow.Count} of {history.Count} row event(s) for {tableName} fall in [{options.From}, {options.To}] (events with no resolvable timestamp are always shown):");
     else
         Console.WriteLine($"{toShow.Count} row event(s) for {tableName}:");
+
+    int needsReviewInListing = toShow.Count(e => e.NeedsManualReview);
+    if (needsReviewInListing > 0)
+        Console.WriteLine(
+            $"{needsReviewInListing} of them ({(double)needsReviewInListing / toShow.Count:P0}) are flagged NEEDS MANUAL REVIEW below - " +
+            "see each one's note before relying on it.");
 
     if (history.Count == 0)
     {
@@ -342,7 +364,7 @@ static async Task<int> RunAsync(string server, string database, string tableName
 
         if (e.Before is null && e.After is null)
         {
-            Console.WriteLine($"[{e.Lsn} {when}] {label}: not shown - {e.Note}");
+            Console.WriteLine($"[{e.Lsn} {when}] {label}: NEEDS MANUAL REVIEW - not shown - {e.Note}");
             continue;
         }
 
@@ -354,7 +376,7 @@ static async Task<int> RunAsync(string server, string database, string tableName
             : $"[{e.Lsn} {when}] {label}: {(e.Kind == RowEventKind.Insert ? afterText : beforeText)}");
 
         if (e.Note is not null)
-            Console.WriteLine($"    ({e.Note})");
+            Console.WriteLine($"    NEEDS MANUAL REVIEW: {e.Note}");
 
         if (options.ShowUndoSql)
         {

@@ -10,7 +10,21 @@ public sealed record RowEvent(
     string? Note,
     DateTime? Timestamp,
     string PageId,
-    int SlotId);
+    int SlotId)
+{
+    /// <summary>
+    /// True whenever this event's data should not be trusted as-is without
+    /// a human looking at it first - a decode limitation, a patch failure,
+    /// or (most importantly) a value whose bytes crossed a 512-byte log
+    /// block boundary the offline scanner can detect but not yet repair
+    /// (see RowHistoryReconstructor's *CorruptionNote members). Every code
+    /// path in this codebase that sets Note does so exactly because the
+    /// event isn't fully trustworthy, so this is derived from Note rather
+    /// than tracked as a second, independently-settable flag that could
+    /// drift out of sync with it.
+    /// </summary>
+    public bool NeedsManualReview => Note is not null;
+}
 
 /// <summary>
 /// Walks a table's log records in LSN order and reconstructs each

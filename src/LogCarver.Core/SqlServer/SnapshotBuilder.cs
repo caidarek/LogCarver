@@ -5,7 +5,17 @@ public sealed record SnapshotRow(
     int SlotId,
     IReadOnlyDictionary<string, object?>? Values,
     string AsOfLsn,
-    string? Note);
+    string? Note)
+{
+    /// <summary>
+    /// Mirrors RowEvent.NeedsManualReview - see that doc comment. Here it's
+    /// always true (Note is only ever set, to either the source event's own
+    /// Note or the "could not be decoded" fallback, exactly when Values is
+    /// null), but deriving it the same way keeps the two types' semantics
+    /// identical rather than relying on a caller remembering that.
+    /// </summary>
+    public bool NeedsManualReview => Note is not null;
+}
 
 public sealed record SnapshotResult(
     IReadOnlyList<SnapshotRow> Rows,
