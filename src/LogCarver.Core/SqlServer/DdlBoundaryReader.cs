@@ -63,6 +63,17 @@ public static class DdlBoundaryReader
         // ALTER TABLE ... ADD COLUMN, which is metadata-only but applies to
         // every partition at once) would otherwise show up once per
         // matching hobt_id.
+        //
+        // TODO (noted, not fixed - correctness over performance for now):
+        // this re-scans the entire active log (BoundarySql's two
+        // fn_dblog(NULL,NULL) passes) once per hobt_id, i.e. once per
+        // partition for a partitioned table. Fine for the common case, but
+        // scales linearly with partition count - a table with hundreds of
+        // (e.g. date-)partitions would do hundreds of full scans. A single-
+        // scan version is possible: pull every LOP_HOBT_DDL row once,
+        // parse "rowset <id>." out of Description client-side, filter
+        // against a HashSet of hobtIds, then do one LOP_BEGIN_XACT join on
+        // the surviving transaction IDs.
         var byLsn = new Dictionary<string, DdlBoundary>();
         foreach (long hobtId in hobtIds)
         {

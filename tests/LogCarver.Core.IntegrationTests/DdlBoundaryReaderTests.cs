@@ -83,9 +83,32 @@ public class DdlBoundaryReaderTests(SqlServerFixture fixture)
     /// rows from that partition could then be decoded with the new schema
     /// with no warning (exactly the "94%"-class silent-corruption failure
     /// mode this whole class exists to prevent).
+    ///
+    /// Uses REBUILD PARTITION = 3, not ADD COLUMN: an independent reviewer
+    /// caught that ADD COLUMN is metadata-only and applies to every
+    /// partition's hobt at once, so it would find a boundary even against
+    /// the old single-hobt code and pass for the wrong reason.
+    /// REBUILD PARTITION = 3 WITH (DATA_COMPRESSION = ROW) is a genuine
+    /// physical rewrite intended to touch only that one partition's own
+    /// hobt_id, which is what this test means to exercise ("check every
+    /// hobt_id" versus "check whichever one came back first").
+    ///
+    /// Honesty note: bug injection against this exact test (reverting just
+    /// the union-across-hobts change) did NOT reproduce a failure on the
+    /// real SQL Server instance this was verified against, whether
+    /// rebuilding partition 1 or partition 3 - LOP_HOBT_DDL's logging for a
+    /// single-partition REBUILD did not behave the way the reasoning above
+    /// predicted on this instance, and digging further into exactly why
+    /// was judged not worth the time against the actual risk. The
+    /// production fix (querying every hobt_id and unioning results,
+    /// instead of trusting ExecuteScalar's unspecified row order) remains
+    /// unambiguously more correct regardless; this test positively confirms
+    /// the fixed code still returns the right answer for this scenario,
+    /// same as the SchemaReader tests above, even though it doesn't
+    /// (here) also prove the old code was wrong.
     /// </summary>
     [Fact]
-    public async Task GetDdlBoundariesAsync_OnAPartitionedTable_DetectsDdlRegardlessOfWhichPartitionsHobtItTouched()
+    public async Task GetDdlBoundariesAsync_OnAPartitionedTable_DetectsDdlThatOnlyTouchedOnePartitionsHobt()
     {
         const string tableName = "dbo.PartitionedDdlTestTable";
         await using var setup = new SqlConnection(fixture.ConnectionString);
@@ -97,7 +120,7 @@ public class DdlBoundaryReaderTests(SqlServerFixture fixture)
             "CREATE PARTITION FUNCTION PF_DdlBoundaryTest (INT) AS RANGE LEFT FOR VALUES (10, 20); " +
             "CREATE PARTITION SCHEME PS_DdlBoundaryTest AS PARTITION PF_DdlBoundaryTest ALL TO ([PRIMARY]); " +
             $"CREATE TABLE {tableName} (Id INT NOT NULL, Note VARCHAR(200)) ON PS_DdlBoundaryTest(Id); " +
-            $"ALTER TABLE {tableName} ADD Bonus INT NULL;",
+            $"ALTER TABLE {tableName} REBUILD PARTITION = 3 WITH (DATA_COMPRESSION = ROW);",
             setup))
         {
             await create.ExecuteNonQueryAsync();

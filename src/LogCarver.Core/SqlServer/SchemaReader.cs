@@ -18,20 +18,30 @@ namespace LogCarver.Core.SqlServer;
 ///
 /// Table partitioning: sys.partitions also has one row per PARTITION for a
 /// given index_id, not just one - a table with N partitions returns this
-/// entire column layout N times over (once per partition_id, all
-/// identical - a column's physical offset/type/nullability never varies
-/// by partition, only which physical partition a given ROW lives in
-/// does). Returning every one of those duplicate rows used to corrupt
-/// RowDecoder's positional variable-length-column matching downstream
-/// (schema.Where(LeafOffset &lt; 0).OrderByDescending(LeafOffset), matched
-/// index-for-index against the row's own offset array - N duplicates per
-/// column shifts that mapping and decodes wrong values, not an
-/// exception). GetTableSchemaAsync de-duplicates by ColumnId below so a
-/// partitioned table's schema still resolves correctly; the separate,
-/// harder problem of a partitioned table's actual ROW DATA living across
-/// multiple PartitionIds is handled where the row-scanning code chooses
-/// which PartitionId(s) to look for (LogCarverOffline's CaptureMetadata),
-/// not here.
+/// entire column layout N times over (once per partition_id). For an
+/// ordinary partitioned table these N rows are identical (a column's
+/// physical offset/type/nullability doesn't vary by partition, only which
+/// physical partition a given ROW lives in does), and returning every one
+/// of those duplicates used to corrupt RowDecoder's positional
+/// variable-length-column matching downstream (schema.Where(LeafOffset
+/// &lt; 0).OrderByDescending(LeafOffset), matched index-for-index against
+/// the row's own offset array - N duplicates per column shifts that
+/// mapping and decodes wrong values, not an exception).
+///
+/// GetTableSchemaAsync de-duplicates by ColumnId, but does NOT blindly
+/// keep whichever partition's row came back first: SQL Server allows
+/// per-partition DATA_COMPRESSION (ALTER TABLE ... REBUILD PARTITION = n
+/// WITH (DATA_COMPRESSION = PAGE)), and a compressed partition's rows use
+/// a different physical layout than an uncompressed one - a mismatch here
+/// would mean silently applying one partition's layout to another
+/// partition's differently-shaped rows, an even quieter version of the
+/// exact bug this fix closes. Two rows for the same ColumnId that
+/// disagree on anything decode-relevant throw rather than pick one
+/// arbitrarily. LogCarverOffline's CaptureMetadata already refuses any
+/// compressed table outright (a blunter, already-existing gate this one
+/// backs up); the public/online LogCarver.Cli currently only warns on
+/// compression and continues, so this is this path's only real protection
+/// against mixed per-partition compression.
 /// </summary>
 public static class SchemaReader
 {
@@ -56,15 +66,13 @@ public static class SchemaReader
 
         // Keyed by ColumnId, not just appended - see this class's doc
         // comment for why a partitioned table returns the same column
-        // multiple times over, and why keeping only the first occurrence
-        // (rather than every row) is correct rather than a workaround.
+        // multiple times over.
         var results = new Dictionary<int, ColumnSchema>();
         await using var reader = await command.ExecuteReaderAsync(ct);
         while (await reader.ReadAsync(ct))
         {
             int columnId = reader.GetInt32(reader.GetOrdinal("ColumnId"));
-            if (results.ContainsKey(columnId)) continue;
-            results[columnId] = new ColumnSchema(
+            var candidate = new ColumnSchema(
                 Name: reader.GetString(reader.GetOrdinal("ColName")),
                 ColumnId: columnId,
                 LeafOffset: reader.GetInt16(reader.GetOrdinal("LeafOffset")),
@@ -72,6 +80,20 @@ public static class SchemaReader
                 MaxLength: reader.GetInt16(reader.GetOrdinal("MaxLength")),
                 SystemTypeId: reader.GetByte(reader.GetOrdinal("SystemTypeId")),
                 Scale: reader.GetByte(reader.GetOrdinal("Scale")));
+
+            if (results.TryGetValue(columnId, out var existing))
+            {
+                // record equality compares every property - any
+                // disagreement means two partitions' physical layouts for
+                // this column genuinely differ (see doc comment).
+                if (existing != candidate)
+                    throw new NotSupportedException(
+                        $"Column '{candidate.Name}' has inconsistent physical layout across '{tableName}''s partitions " +
+                        "(possibly mixed per-partition DATA_COMPRESSION) - refusing rather than guessing which " +
+                        "partition's layout applies to which rows.");
+                continue;
+            }
+            results[columnId] = candidate;
         }
         return results.Values.OrderBy(c => c.ColumnId).ToList();
     }

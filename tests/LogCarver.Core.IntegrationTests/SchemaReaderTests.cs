@@ -128,6 +128,49 @@ public class SchemaReaderTests(SqlServerFixture fixture)
         Assert.Equal(1, schema.Count(c => c.Name == "Note"));
     }
 
+    /// <summary>
+    /// Regression test for a gap an independent reviewer caught in the fix
+    /// above: blindly keeping "whichever partition's row came back first"
+    /// is only safe if every partition's physical row layout is actually
+    /// identical. SQL Server allows per-partition DATA_COMPRESSION
+    /// (ALTER TABLE ... REBUILD PARTITION = n WITH (DATA_COMPRESSION = ...)),
+    /// and a compressed partition's rows use a different physical layout
+    /// than an uncompressed one - silently picking one partition's layout
+    /// and applying it to a differently-shaped partition's rows would be an
+    /// even quieter version of the exact bug the de-duplication fix closes.
+    /// Confirms GetTableSchemaAsync detects the disagreement and refuses
+    /// rather than guessing.
+    /// </summary>
+    [Fact]
+    public async Task GetTableSchemaAsync_OnATableWithMixedPerPartitionCompression_ThrowsRatherThanGuessing()
+    {
+        const string partitionedTable = "dbo.MixedCompressionTestTable";
+        await using var setup = new SqlConnection(fixture.ConnectionString);
+        await setup.OpenAsync();
+        await using (var create = new SqlCommand(
+            $"IF OBJECT_ID('{partitionedTable}') IS NOT NULL DROP TABLE {partitionedTable}; " +
+            "IF EXISTS (SELECT 1 FROM sys.partition_schemes WHERE name = 'PS_MixedCompressionTest') DROP PARTITION SCHEME PS_MixedCompressionTest; " +
+            "IF EXISTS (SELECT 1 FROM sys.partition_functions WHERE name = 'PF_MixedCompressionTest') DROP PARTITION FUNCTION PF_MixedCompressionTest; " +
+            "CREATE PARTITION FUNCTION PF_MixedCompressionTest (INT) AS RANGE LEFT FOR VALUES (10, 20); " +
+            "CREATE PARTITION SCHEME PS_MixedCompressionTest AS PARTITION PF_MixedCompressionTest ALL TO ([PRIMARY]); " +
+            $"CREATE TABLE {partitionedTable} (Id INT NOT NULL, Note VARCHAR(200)) ON PS_MixedCompressionTest(Id); " +
+            $"INSERT INTO {partitionedTable} (Id, Note) VALUES (5, 'partition-1'), (15, 'partition-2'), (25, 'partition-3'); " +
+            // Only partition 1 gets row-compressed - partitions 2 and 3
+            // stay uncompressed, a genuine physical-layout mismatch.
+            $"ALTER TABLE {partitionedTable} REBUILD PARTITION = 1 WITH (DATA_COMPRESSION = ROW);",
+            setup))
+        {
+            await create.ExecuteNonQueryAsync();
+        }
+
+        await using var connection = new SqlConnection(fixture.ConnectionString);
+        await connection.OpenAsync();
+
+        var ex = await Assert.ThrowsAsync<NotSupportedException>(
+            () => SchemaReader.GetTableSchemaAsync(connection, partitionedTable));
+        Assert.Contains("inconsistent physical layout", ex.Message);
+    }
+
     [Fact]
     public async Task GetTableSchemaAsync_UnknownTable_ReturnsEmpty()
     {
