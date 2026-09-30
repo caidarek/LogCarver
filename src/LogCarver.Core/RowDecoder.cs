@@ -109,7 +109,7 @@ public static class RowDecoder
             {
                 TypeInt => BitConverter.ToInt32(row.Slice(col.LeafOffset, 4)),
                 TypeDate => DecodeDate(row, col.LeafOffset),
-                TypeDateTime2 => DecodeDateTime2(row, col.LeafOffset, col.MaxLength),
+                TypeDateTime2 => DecodeDateTime2(row, col.LeafOffset, col.MaxLength, col.Scale),
                 TypeDecimal or TypeNumeric => DecodeDecimal(row, col.LeafOffset, col.MaxLength, col.Scale),
                 // char/nchar are fixed-length in-row, always stored padded
                 // with spaces (0x20 / U+0020) out to the declared length -
@@ -245,27 +245,75 @@ public static class RowDecoder
         return new DateTime(1, 1, 1, 0, 0, 0, DateTimeKind.Unspecified).AddDays(days);
     }
 
-    private static DateTime DecodeDateTime2(ReadOnlySpan<byte> row, int offset, int length)
+    /// <summary>
+    /// DATETIME2(n)'s in-row time part is a little-endian integer counting
+    /// units of 10^-n seconds since midnight - NOT always milliseconds, a
+    /// mistake this decoder used to make for scale 4 (0.1ms units, not 1ms).
+    /// Storage width for the time part depends on the declared scale, not
+    /// just a single fixed width: scale 0-2 -&gt; 3 bytes, 3-4 -&gt; 4 bytes,
+    /// 5-7 -&gt; 5 bytes, always followed by the same 3-byte day count
+    /// DATE/DecodeDate use. Verified byte-for-byte against a real SQL
+    /// Server instance at every scale 0-7 (e.g. scale 1's stored 452961
+    /// means 45296.1s = 12:34:56.1; scale 7's stored 452961234567 means
+    /// 45296.1234567s = 12:34:56.1234567) - previously only scale 3/4 (both
+    /// sharing the 4-byte time width) had been checked, and only scale 3
+    /// happened to be correct by coincidence of matching plain milliseconds.
+    /// Real customer impact: DATETIME2 columns declared with no explicit
+    /// scale default to DATETIME2(7) (8-byte storage, 5-byte time part) -
+    /// e.g. DECISION.StockDecisionDaily.CreateDate - which this decoder
+    /// used to refuse outright (`NotSupportedException`), taking the whole
+    /// row down via RowHistoryReconstructor.TryDecode regardless of any
+    /// other column's decodability.
+    /// </summary>
+    private static DateTime DecodeDateTime2(ReadOnlySpan<byte> row, int offset, int length, int scale)
     {
-        int timeLen = length - 3;
-        if (timeLen != 4)
+        int expectedTimeLen = scale switch
         {
-            // Only DATETIME2(3)/(4) (7-byte storage, 4-byte time part) has
-            // been validated against real SQL Server output. Other scales
-            // use a different time-part width; refuse rather than guess.
+            >= 0 and <= 2 => 3,
+            3 or 4 => 4,
+            >= 5 and <= 7 => 5,
+            _ => throw new NotSupportedException($"DATETIME2 scale {scale} is out of the valid 0-7 range; refusing to decode."),
+        };
+        int timeLen = length - 3;
+        if (timeLen != expectedTimeLen)
+        {
+            // The declared scale and the row's actual storage length
+            // disagree - could mean a schema-drift scenario (scale changed
+            // via ALTER COLUMN) this decoder doesn't specifically guard
+            // for DATETIME2 the way it does for added/dropped columns.
+            // Refuse rather than guess which one to trust.
+            //
+            // NOTE this only catches a scale change that crosses a byte-
+            // width bucket (0-2 / 3-4 / 5-7). A scale change WITHIN the
+            // same bucket (e.g. DATETIME2(3) ALTERed to DATETIME2(4), both
+            // 4-byte time parts) is invisible here: the length check
+            // passes, but an old row written under the old scale would be
+            // decoded using the current (wrong) scale's tick unit -
+            // exactly the silent off-by-a-power-of-10 bug this function
+            // exists to prevent, just reachable through stale schema
+            // metadata instead of a decode-logic gap. Not guarded against;
+            // would need the same DDL-boundary-LSN mechanism callers use
+            // for added/dropped columns, extended to cover ALTER COLUMN's
+            // precision changes specifically - not yet built.
             throw new NotSupportedException(
-                $"DATETIME2 storage length {length} is not validated; refusing to decode.");
+                $"DATETIME2 storage length {length} doesn't match scale {scale}'s expected time-part width ({expectedTimeLen} bytes); refusing to decode.");
         }
 
-        uint ticks = BitConverter.ToUInt32(row.Slice(offset, 4)); // milliseconds since midnight
+        Span<byte> timeBuf = stackalloc byte[8];
+        row.Slice(offset, timeLen).CopyTo(timeBuf);
+        ulong rawTimeUnits = BitConverter.ToUInt64(timeBuf); // units of 10^-scale seconds since midnight
 
         Span<byte> dateBuf = stackalloc byte[4];
         row.Slice(offset + timeLen, 3).CopyTo(dateBuf);
         uint days = BitConverter.ToUInt32(dateBuf); // days since 0001-01-01
 
+        // .NET DateTime ticks are 100ns (10^-7s) units - scale to that
+        // resolution regardless of the column's own declared scale.
+        long ticksPerUnit = (long)Math.Pow(10, 7 - scale);
+
         return new DateTime(1, 1, 1, 0, 0, 0, DateTimeKind.Unspecified)
             .AddDays(days)
-            .AddMilliseconds(ticks);
+            .AddTicks((long)rawTimeUnits * ticksPerUnit);
     }
 
     /// <summary>

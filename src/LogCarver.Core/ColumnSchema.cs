@@ -24,9 +24,15 @@ namespace LogCarver.Core;
 /// 239 (nchar) are currently decoded.
 /// </param>
 /// <param name="Scale">
-/// sys.columns.scale - only meaningful for decimal/numeric (where digits
-/// after this many trailing decimal digits are places), 0/unused for every
-/// other supported type.
+/// sys.columns.scale. Meaningful for decimal/numeric (digits after this
+/// many trailing decimal digits are places) AND datetime2 (fractional-
+/// seconds precision, which determines both the in-row time part's byte
+/// width and the unit its raw integer counts - see
+/// <see cref="RowDecoder"/>'s DecodeDateTime2). 0/unused for every other
+/// supported type. Always populate this from the real column even for a
+/// hand-constructed schema (tests, alternate schema sources) - omitting it
+/// for a datetime2 column silently reintroduces a real bug class (values
+/// off by a power of 10) rather than failing loudly.
 /// </param>
 public sealed record ColumnSchema(
     string Name,

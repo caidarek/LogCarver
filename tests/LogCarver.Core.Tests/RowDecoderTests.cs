@@ -16,7 +16,7 @@ public class RowDecoderTests
     private static readonly IReadOnlyList<ColumnSchema> LogTestSchema =
     [
         new ColumnSchema("Id", 1, LeafOffset: 4, LeafNullBit: 1, MaxLength: 4, SystemTypeId: 56),
-        new ColumnSchema("CreatedAt", 2, LeafOffset: 8, LeafNullBit: 2, MaxLength: 7, SystemTypeId: 42),
+        new ColumnSchema("CreatedAt", 2, LeafOffset: 8, LeafNullBit: 2, MaxLength: 7, SystemTypeId: 42, Scale: 3),
         new ColumnSchema("Amount", 3, LeafOffset: 15, LeafNullBit: 3, MaxLength: 4, SystemTypeId: 56),
         new ColumnSchema("Note", 4, LeafOffset: -1, LeafNullBit: 4, MaxLength: 200, SystemTypeId: 167),
         new ColumnSchema("Sentinel", 5, LeafOffset: -2, LeafNullBit: 5, MaxLength: 100, SystemTypeId: 167),
@@ -50,6 +50,32 @@ public class RowDecoderTests
     [
         new ColumnSchema("Id", 1, LeafOffset: 4, LeafNullBit: 1, MaxLength: 4, SystemTypeId: 56),
         new ColumnSchema("D", 2, LeafOffset: 8, LeafNullBit: 2, MaxLength: 3, SystemTypeId: 40),
+    ];
+
+    // dbo.Dt2ScaleTest: Id INT, D0 DATETIME2(0), D7 DATETIME2(7), D7default DATETIME2
+    // (no explicit scale declared, which defaults to DATETIME2(7) - the real
+    // shape of DECISION.StockDecisionDaily.CreateDate).
+    private static readonly IReadOnlyList<ColumnSchema> Dt2ScaleTestSchema =
+    [
+        new ColumnSchema("Id", 1, LeafOffset: 4, LeafNullBit: 1, MaxLength: 4, SystemTypeId: 56),
+        new ColumnSchema("D0", 2, LeafOffset: 8, LeafNullBit: 2, MaxLength: 6, SystemTypeId: 42, Scale: 0),
+        new ColumnSchema("D7", 3, LeafOffset: 14, LeafNullBit: 3, MaxLength: 8, SystemTypeId: 42, Scale: 7),
+        new ColumnSchema("D7default", 4, LeafOffset: 22, LeafNullBit: 4, MaxLength: 8, SystemTypeId: 42, Scale: 7),
+    ];
+
+    // dbo.Dt2ScaleTest2: Id INT, D1 DATETIME2(1), D3 DATETIME2(3), D4 DATETIME2(4),
+    // D5 DATETIME2(5), D6 DATETIME2(6) - covers every remaining scale not in
+    // Dt2ScaleTestSchema, in particular scale 4 (previously mis-decoded as if
+    // its raw ticks were plain milliseconds, same as scale 3's - they share
+    // the same 4-byte time-part width but not the same tick unit).
+    private static readonly IReadOnlyList<ColumnSchema> Dt2ScaleTest2Schema =
+    [
+        new ColumnSchema("Id", 1, LeafOffset: 4, LeafNullBit: 1, MaxLength: 4, SystemTypeId: 56),
+        new ColumnSchema("D1", 2, LeafOffset: 8, LeafNullBit: 2, MaxLength: 6, SystemTypeId: 42, Scale: 1),
+        new ColumnSchema("D3", 3, LeafOffset: 14, LeafNullBit: 3, MaxLength: 7, SystemTypeId: 42, Scale: 3),
+        new ColumnSchema("D4", 4, LeafOffset: 21, LeafNullBit: 4, MaxLength: 7, SystemTypeId: 42, Scale: 4),
+        new ColumnSchema("D5", 5, LeafOffset: 28, LeafNullBit: 5, MaxLength: 8, SystemTypeId: 42, Scale: 5),
+        new ColumnSchema("D6", 6, LeafOffset: 36, LeafNullBit: 6, MaxLength: 8, SystemTypeId: 42, Scale: 6),
     ];
 
     // dbo.DecimalTest: Id INT, Small DECIMAL(5,2), Big DECIMAL(18,4)
@@ -315,5 +341,89 @@ public class RowDecoderTests
         Assert.Equal(1, result["Id"]);
         Assert.Equal("<off-row value, not decoded>", result["NoteA"]);
         Assert.Equal("<off-row value, not decoded>", result["NoteB"]);
+    }
+
+    [Fact]
+    public void Decode_DateTime2Scale0And7_MatchesGroundTruth()
+    {
+        // Real captured row for INSERT INTO dbo.Dt2ScaleTest (D0, D7, D7default)
+        // VALUES ('2026-09-30 12:34:56', '2026-09-30 12:34:56.1234567',
+        // '2026-09-30 12:34:56.1234567') - D7default has no explicit scale,
+        // which SQL Server defaults to 7 (8-byte storage, 5-byte time part).
+        // Before this fix, any DATETIME2 column at its default scale (no
+        // explicit precision - very common in real schemas) refused to
+        // decode at all, taking the whole row down via
+        // RowHistoryReconstructor.TryDecode. Real customer impact:
+        // DECISION.StockDecisionDaily.CreateDate is exactly this shape.
+        byte[] row = Convert.FromHexString(
+            "10001E0001000000F0B000304A0B87EE977669304A0B87EE977669304A0B040000");
+
+        var result = RowDecoder.Decode(row, Dt2ScaleTestSchema);
+
+        Assert.Equal(1, result["Id"]);
+        Assert.Equal(new DateTime(2026, 9, 30, 12, 34, 56), result["D0"]);
+        Assert.Equal(new DateTime(2026, 9, 30, 12, 34, 56).AddTicks(1234567), result["D7"]);
+        Assert.Equal(new DateTime(2026, 9, 30, 12, 34, 56).AddTicks(1234567), result["D7default"]);
+    }
+
+    [Fact]
+    public void Decode_DateTime2AllRemainingScales_MatchesGroundTruth()
+    {
+        // Real captured row for INSERT INTO dbo.Dt2ScaleTest2 (D1, D3, D4, D5, D6)
+        // VALUES ('2026-09-30 12:34:56.1', '...56.123', '...56.1234',
+        // '...56.12345', '...56.123456'). D3 and D4 share the same 4-byte
+        // time-part storage width but NOT the same tick unit (D3's raw value
+        // happens to equal plain milliseconds; D4's does not - 0.1ms units)
+        // - this is the specific case the old code got wrong by assuming
+        // "4-byte time part" always meant milliseconds.
+        byte[] row = Convert.FromHexString(
+            "10002C000100000061E906304A0BFB29B302304A0BD2A3FF1A304A0B3966FC0D01304A0B40FEDB8B0A304A0B060000");
+
+        var result = RowDecoder.Decode(row, Dt2ScaleTest2Schema);
+
+        Assert.Equal(1, result["Id"]);
+        Assert.Equal(new DateTime(2026, 9, 30, 12, 34, 56).AddTicks(1000000), result["D1"]);
+        Assert.Equal(new DateTime(2026, 9, 30, 12, 34, 56).AddTicks(1230000), result["D3"]);
+        Assert.Equal(new DateTime(2026, 9, 30, 12, 34, 56).AddTicks(1234000), result["D4"]);
+        Assert.Equal(new DateTime(2026, 9, 30, 12, 34, 56).AddTicks(1234500), result["D5"]);
+        Assert.Equal(new DateTime(2026, 9, 30, 12, 34, 56).AddTicks(1234560), result["D6"]);
+    }
+
+    [Fact]
+    public void Decode_DateTime2ScaleDoesNotMatchStorageLength_ThrowsInsteadOfMisdecoding()
+    {
+        // Same real captured Dt2ScaleTest row as above, but D0's schema
+        // claims Scale: 7 (expects a 5-byte time part, 8-byte storage)
+        // when the actual in-row data is genuinely scale 0 (3-byte time
+        // part, 6-byte storage, per its real MaxLength here). This is the
+        // validation path guarding against a scale/length mismatch -
+        // refuse rather than silently apply the wrong tick unit.
+        byte[] row = Convert.FromHexString(
+            "10001E0001000000F0B000304A0B87EE977669304A0B87EE977669304A0B040000");
+
+        IReadOnlyList<ColumnSchema> badScaleSchema =
+        [
+            new ColumnSchema("Id", 1, LeafOffset: 4, LeafNullBit: 1, MaxLength: 4, SystemTypeId: 56),
+            new ColumnSchema("D0", 2, LeafOffset: 8, LeafNullBit: 2, MaxLength: 6, SystemTypeId: 42, Scale: 7),
+        ];
+
+        var ex = Assert.Throws<NotSupportedException>(() => RowDecoder.Decode(row, badScaleSchema));
+        Assert.Contains("doesn't match scale", ex.Message);
+    }
+
+    [Fact]
+    public void Decode_DateTime2ScaleOutOfRange_Throws()
+    {
+        byte[] row = Convert.FromHexString(
+            "10001E0001000000F0B000304A0B87EE977669304A0B87EE977669304A0B040000");
+
+        IReadOnlyList<ColumnSchema> outOfRangeScaleSchema =
+        [
+            new ColumnSchema("Id", 1, LeafOffset: 4, LeafNullBit: 1, MaxLength: 4, SystemTypeId: 56),
+            new ColumnSchema("D0", 2, LeafOffset: 8, LeafNullBit: 2, MaxLength: 6, SystemTypeId: 42, Scale: 8),
+        ];
+
+        var ex = Assert.Throws<NotSupportedException>(() => RowDecoder.Decode(row, outOfRangeScaleSchema));
+        Assert.Contains("out of the valid 0-7 range", ex.Message);
     }
 }
