@@ -83,4 +83,34 @@ public class UndoSqlGeneratorTests
 
         Assert.Null(UndoSqlGenerator.Generate(evt, "dbo.Orders"));
     }
+
+    [Fact]
+    public void DecimalValue_FormatsAsPlainNumericLiteral_NotThrows()
+    {
+        // SqlStatementBuilder.FormatSqlLiteral had no case for `decimal` -
+        // any row with a DECIMAL/NUMERIC column (added to RowDecoder
+        // separately) crashed the entire Undo/Replay generation outright
+        // with "Cannot format a SQL literal for value of type
+        // System.Decimal" instead of producing a statement for this one
+        // row, taking every other row in the export down with it. Real
+        // customer impact: DECISION.StockDecisionDaily's ConfidenceScore/
+        // EvidenceCompleteness/TargetPrice columns.
+        var row = new Dictionary<string, object?> { ["Id"] = 5, ["Score"] = 123.45m };
+        var evt = new RowEvent("lsn1", RowEventKind.Insert, null, row, null, null, "0001:0F", 1);
+
+        var sql = UndoSqlGenerator.Generate(evt, "dbo.Orders");
+
+        Assert.Equal("DELETE FROM [dbo].[Orders] WHERE [Id] = 5 AND [Score] = 123.45;", sql);
+    }
+
+    [Fact]
+    public void NegativeDecimalValue_FormatsWithoutScientificNotation()
+    {
+        var row = new Dictionary<string, object?> { ["Id"] = 5, ["Score"] = -123456789012.3456m };
+        var evt = new RowEvent("lsn1", RowEventKind.Insert, null, row, null, null, "0001:0F", 1);
+
+        var sql = UndoSqlGenerator.Generate(evt, "dbo.Orders");
+
+        Assert.Equal("DELETE FROM [dbo].[Orders] WHERE [Id] = 5 AND [Score] = -123456789012.3456;", sql);
+    }
 }

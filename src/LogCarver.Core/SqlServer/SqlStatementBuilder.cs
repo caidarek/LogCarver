@@ -55,6 +55,17 @@ internal static class SqlStatementBuilder
         null => "NULL",
         int i => i.ToString(),
         DateTime dt => $"'{dt:yyyy-MM-dd HH:mm:ss.fff}'",
+        // decimal.ToString() never uses scientific notation (unlike
+        // double/float), so this always produces a plain SQL Server
+        // decimal/numeric literal - InvariantCulture avoids a comma
+        // decimal separator on a non-US locale. Added alongside DECIMAL/
+        // NUMERIC column decoding in RowDecoder; missed here until a real
+        // customer table (DECISION.StockDecisionDaily's ConfidenceScore/
+        // EvidenceCompleteness/TargetPrice) crashed the whole
+        // --undo/--replay/--export sql run outright with "Cannot format a
+        // SQL literal for value of type System.Decimal" - every other
+        // column in every other row was lost too, not just this value.
+        decimal m => m.ToString(System.Globalization.CultureInfo.InvariantCulture),
         string s => $"N'{s.Replace("'", "''")}'",
         _ => throw new NotSupportedException($"Cannot format a SQL literal for value of type {value.GetType()}."),
     };
