@@ -554,4 +554,30 @@ public class RowDecoderTests
         Assert.Equal(42, result["Id"]);
         Assert.Equal(["Id"], corrupted);
     }
+
+    // Regression test for a real gap found via customer testing on
+    // 2026-09-30: a bigint column (system_type_id 127, e.g. an IDENTITY
+    // primary key like [LOG].[JobRun]'s JobID) hit the "not implemented
+    // yet" NotSupportedException, which discards the entire row - every
+    // other column lost too, not just this one - exactly the failure mode
+    // this decoder exists to avoid for a type this common.
+    private static readonly IReadOnlyList<ColumnSchema> BigIntColumnSchema =
+    [
+        new ColumnSchema("JobId", 1, LeafOffset: 4, LeafNullBit: 1, MaxLength: 8, SystemTypeId: 127),
+    ];
+
+    [Fact]
+    public void Decode_BigIntColumn_DecodesAsInt64NotJustTheLow32Bits()
+    {
+        // tagA=0x10 (null bitmap only, no var-length columns), fixedEnd=12,
+        // JobId = 5,000,000,000 (bytes 4-11, little-endian) - deliberately
+        // larger than Int32.MaxValue (~2.1 billion) to prove this reads the
+        // full 8 bytes as Int64 rather than silently truncating to 32 bits,
+        // colCount=1 (bytes 12-13), null bitmap byte 0x00 (not null).
+        byte[] row = Convert.FromHexString("10000C0000F2052A01000000010000");
+
+        var result = RowDecoder.Decode(row, BigIntColumnSchema);
+
+        Assert.Equal(5_000_000_000L, result["JobId"]);
+    }
 }

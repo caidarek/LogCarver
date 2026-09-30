@@ -44,6 +44,7 @@ namespace LogCarver.Core;
 public static class RowDecoder
 {
     private const int TypeInt = 56;
+    private const int TypeBigInt = 127;
     private const int TypeDate = 40;
     private const int TypeDateTime2 = 42;
     private const int TypeDecimal = 106;
@@ -153,6 +154,7 @@ public static class RowDecoder
             result[col.Name] = col.SystemTypeId switch
             {
                 TypeInt => BitConverter.ToInt32(row.Slice(col.LeafOffset, 4)),
+                TypeBigInt => BitConverter.ToInt64(row.Slice(col.LeafOffset, 8)),
                 TypeDate => DecodeDate(row, col.LeafOffset),
                 TypeDateTime2 => DecodeDateTime2(row, col.LeafOffset, col.MaxLength, col.Scale),
                 TypeDecimal or TypeNumeric => DecodeDecimal(row, col.LeafOffset, col.MaxLength, col.Scale),
@@ -193,12 +195,12 @@ public static class RowDecoder
                 result[col.Name] = null;
                 continue;
             }
-            // TypeInt is always 4 bytes and TypeDate always 3, regardless
-            // of the schema's own declared MaxLength for either (neither
-            // ever varies) - every other fixed-length type here reads
-            // exactly col.MaxLength bytes, so that's the right byte count
-            // to check for overlap in every other case.
-            int fixedByteLength = col.SystemTypeId switch { TypeInt => 4, TypeDate => 3, _ => col.MaxLength };
+            // TypeInt is always 4 bytes, TypeBigInt always 8, and TypeDate
+            // always 3, regardless of the schema's own declared MaxLength
+            // for any of them (none ever varies) - every other fixed-length
+            // type here reads exactly col.MaxLength bytes, so that's the
+            // right byte count to check for overlap in every other case.
+            int fixedByteLength = col.SystemTypeId switch { TypeInt => 4, TypeBigInt => 8, TypeDate => 3, _ => col.MaxLength };
             FlagIfOverlapping(col.Name, col.LeafOffset, fixedByteLength);
         }
 

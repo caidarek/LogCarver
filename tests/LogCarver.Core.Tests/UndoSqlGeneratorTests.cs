@@ -113,4 +113,21 @@ public class UndoSqlGeneratorTests
 
         Assert.Equal("DELETE FROM [dbo].[Orders] WHERE [Id] = 5 AND [Score] = -123456789012.3456;", sql);
     }
+
+    [Fact]
+    public void BigIntValue_FormatsAsPlainNumericLiteral_NotThrows()
+    {
+        // Same class of gap as the decimal case above, found the same way:
+        // SqlStatementBuilder.FormatSqlLiteral had no case for `long`, so
+        // any row with a BIGINT column (added to RowDecoder separately)
+        // crashed the entire Undo/Replay generation outright instead of
+        // producing a statement for this one row. Real customer impact:
+        // [LOG].[JobRun]'s bigint JobID identity column.
+        var row = new Dictionary<string, object?> { ["JobId"] = 5_000_000_000L, ["Status"] = "RUNNING" };
+        var evt = new RowEvent("lsn1", RowEventKind.Insert, null, row, null, null, "0001:0F", 1);
+
+        var sql = UndoSqlGenerator.Generate(evt, "dbo.Orders");
+
+        Assert.Equal("DELETE FROM [dbo].[Orders] WHERE [JobId] = 5000000000 AND [Status] = N'RUNNING';", sql);
+    }
 }

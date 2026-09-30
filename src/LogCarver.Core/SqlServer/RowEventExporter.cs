@@ -230,6 +230,12 @@ public static class RowEventExporter
             {
                 null => null,
                 int i => JsonValue.Create(i),
+                // Added alongside BIGINT column decoding in RowDecoder -
+                // without this, a bigint value fell into the generic
+                // ToString() fallback below and came out as a quoted JSON
+                // string ("12345") instead of a real number, unlike every
+                // other integer type.
+                long l => JsonValue.Create(l),
                 DateTime dt => JsonValue.Create(dt),
                 string s => JsonValue.Create(s),
                 _ => JsonValue.Create(value.ToString()),

@@ -54,6 +54,12 @@ internal static class SqlStatementBuilder
     {
         null => "NULL",
         int i => i.ToString(),
+        // Added alongside BIGINT column decoding in RowDecoder - missed
+        // here would repeat exactly the DECIMAL/NUMERIC gap above: a real
+        // customer table ([LOG].[JobRun]'s bigint JobID) hitting the
+        // NotSupportedException below outright crashes the whole
+        // --undo/--replay/--export sql run, losing every other row too.
+        long l => l.ToString(),
         DateTime dt => $"'{dt:yyyy-MM-dd HH:mm:ss.fff}'",
         // decimal.ToString() never uses scientific notation (unlike
         // double/float), so this always produces a plain SQL Server
