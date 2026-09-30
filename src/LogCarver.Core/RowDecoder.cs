@@ -30,6 +30,16 @@ namespace LogCarver.Core;
 /// caller must independently confirm the row's LSN does not predate a
 /// schema-changing DDL (see the DDL boundary detection notes in the
 /// research log) before trusting any fixed-length column's value.
+///
+/// Off-row/complex columns (e.g. varchar(max)/nvarchar(max) stored off-row):
+/// the variable-length offset array marks these with bit 0x8000 on their
+/// cumulative end-offset entry. Their in-row bytes are only a root pointer
+/// into a separate LOB tree page/log-record format this decoder does not
+/// parse - the column is decoded as the literal string
+/// "&lt;off-row value, not decoded&gt;" rather than the real content, but the
+/// rest of the row (every other column) still decodes normally. Before this
+/// was handled, treating the pointer bytes as plain length-prefixed text
+/// threw and silently dropped the entire row.
 /// </summary>
 public static class RowDecoder
 {
@@ -70,16 +80,16 @@ public static class RowDecoder
         }
         catch (Exception ex) when (ex is ArgumentOutOfRangeException or IndexOutOfRangeException)
         {
-            // The most common real cause: an off-row LOB value. Its in-row
-            // bytes are a pointer structure, not length-prefixed character
-            // data, so treating it as a normal variable-length column
-            // computes a length that runs past the end of the row (研究紀錄
-            // LOB 小節). Could also mean a compressed row reached here
-            // despite the Cli's schema-level compression check. Either way,
-            // this is a known-unsupported row format, not a bug to chase -
-            // surface it as such rather than a raw indexing exception.
+            // Off-row LOB values no longer reach this catch (DecodeCore
+            // detects the 0x8000 "complex column" offset-array flag and
+            // marks just that column as not decoded - see the var-column
+            // loop below), so a genuinely unsupported row format now means
+            // something else, most likely a compressed row that reached
+            // here despite the Cli's schema-level compression check. Either
+            // way, surface it as a known-unsupported row format rather than
+            // a raw indexing exception.
             throw new UnsupportedRowFormatException(
-                "Row bytes don't fit the supported layout - likely an off-row LOB value or a compressed row, neither of which this decoder handles yet.",
+                "Row bytes don't fit the supported layout - likely a compressed row, which this decoder doesn't handle yet.",
                 ex);
         }
     }
@@ -141,18 +151,58 @@ public static class RowDecoder
             for (int i = 0; i < varColCount; i++)
             {
                 ColumnSchema? col = i < varCols.Count ? varCols[i] : null;
-                int endOffset = ReadUInt16LE(row, offsetArrayStart + i * 2);
-                int len = endOffset - prevEnd;
+                int rawEndOffset = ReadUInt16LE(row, offsetArrayStart + i * 2);
+
+                // Bit 0x8000 on an offset-array entry is SQL Server's
+                // "complex column" flag - it means this column's in-row
+                // bytes are a pointer/root structure (e.g. an off-row LOB
+                // root, 16 bytes observed, size independent of the LOB's
+                // actual content length - verified byte-for-byte against a
+                // real SQL Server instance with sp_tableoption 'large value
+                // types out of row'), not length-prefixed character data.
+                // A real cumulative offset can never reach 0x8000 (32768)
+                // since SQL Server's max in-row record size is ~8060 bytes,
+                // so this flag is unambiguous. The bit is a general row-
+                // format mechanism (could in principle also mark a sparse
+                // column-set representation), not exclusively LOB.
+                bool isComplexColumn = (rawEndOffset & 0x8000) != 0;
+                int endOffset = rawEndOffset & 0x7FFF;
 
                 if (col is not null)
                 {
-                    bool isNull = IsColNull(row, nullBitmapStart, col.LeafNullBit);
-                    result[col.Name] = isNull
-                        ? null
-                        : len > 0
-                            ? DecodeVarCharBytes(row.Slice(prevEnd, len), col.SystemTypeId)
-                            : string.Empty; // len==0 and not null = legitimate empty string, not NULL
+                    if (isComplexColumn)
+                    {
+                        // Off-row/complex value: only a root pointer lives
+                        // in-row, the actual content is in a separate LOB
+                        // tree page/log-record format this decoder does not
+                        // parse. Surface that honestly instead of slicing
+                        // pointer bytes as if they were text (which used to
+                        // compute a bogus length running past the row and
+                        // crash, taking every other column in the row down
+                        // with it - see the outer catch in Decode). Never
+                        // observed alongside a genuinely NULL value for this
+                        // column - a NULL LOB column has no off-row content
+                        // to point to, so SQL Server either drops the whole
+                        // variable-length section (no other var column has a
+                        // value) or omits/zero-lengths its own offset-array
+                        // entry via the ordinary null-bitmap path below,
+                        // verified against real captured INSERT/UPDATE rows.
+                        result[col.Name] = "<off-row value, not decoded>";
+                    }
+                    else
+                    {
+                        bool isNull = IsColNull(row, nullBitmapStart, col.LeafNullBit);
+                        int len = endOffset - prevEnd;
+                        result[col.Name] = isNull
+                            ? null
+                            : len > 0
+                                ? DecodeVarCharBytes(row.Slice(prevEnd, len), col.SystemTypeId)
+                                : string.Empty; // len==0 and not null = legitimate empty string, not NULL
+                    }
                 }
+                // Always chain from the masked offset - later columns'
+                // offsets are cumulative from this position regardless of
+                // whether this column itself was off-row.
                 prevEnd = endOffset;
             }
 

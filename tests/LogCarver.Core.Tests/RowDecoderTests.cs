@@ -60,6 +60,34 @@ public class RowDecoderTests
         new ColumnSchema("Big", 3, LeafOffset: 13, LeafNullBit: 3, MaxLength: 9, SystemTypeId: 106, Scale: 4),
     ];
 
+    // dbo.LobOffRowTest: Id INT, Note NVARCHAR(MAX), with
+    // `EXEC sp_tableoption 'dbo.LobOffRowTest', 'large value types out of row', 1`
+    // forcing Note off-row regardless of its actual content length.
+    private static readonly IReadOnlyList<ColumnSchema> LobOffRowSchema =
+    [
+        new ColumnSchema("Id", 1, LeafOffset: 4, LeafNullBit: 1, MaxLength: 4, SystemTypeId: 56),
+        new ColumnSchema("Note", 2, LeafOffset: -1, LeafNullBit: 2, MaxLength: -1, SystemTypeId: 231),
+    ];
+
+    // dbo.LobNotLastTest: Id INT, Note NVARCHAR(MAX) (off-row, forced), Tag NVARCHAR(20)
+    // (in-row) - Note is declared before Tag, so it is NOT the last variable-length
+    // column, exercising offset-chaining through a masked complex-column entry.
+    private static readonly IReadOnlyList<ColumnSchema> LobNotLastSchema =
+    [
+        new ColumnSchema("Id", 1, LeafOffset: 4, LeafNullBit: 1, MaxLength: 4, SystemTypeId: 56),
+        new ColumnSchema("Note", 2, LeafOffset: -1, LeafNullBit: 2, MaxLength: -1, SystemTypeId: 231),
+        new ColumnSchema("Tag", 3, LeafOffset: -2, LeafNullBit: 3, MaxLength: 40, SystemTypeId: 231),
+    ];
+
+    // dbo.LobTwoOffRowTest: Id INT, NoteA NVARCHAR(MAX), NoteB NVARCHAR(MAX), both
+    // forced off-row - two consecutive complex-column entries in the same row.
+    private static readonly IReadOnlyList<ColumnSchema> LobTwoOffRowSchema =
+    [
+        new ColumnSchema("Id", 1, LeafOffset: 4, LeafNullBit: 1, MaxLength: 4, SystemTypeId: 56),
+        new ColumnSchema("NoteA", 2, LeafOffset: -1, LeafNullBit: 2, MaxLength: -1, SystemTypeId: 231),
+        new ColumnSchema("NoteB", 3, LeafOffset: -2, LeafNullBit: 3, MaxLength: -1, SystemTypeId: 231),
+    ];
+
     [Fact]
     public void Decode_RealInsertRow_MatchesGroundTruth()
     {
@@ -220,5 +248,72 @@ public class RowDecoderTests
         Assert.Equal(2, result["Id"]);
         Assert.Equal(-123.45m, result["Small"]);
         Assert.Equal(-123456789012.3456m, result["Big"]);
+    }
+
+    [Fact]
+    public void Decode_OffRowLobColumn_IsMarkedNotDecoded_OtherColumnsUnaffected()
+    {
+        // Real captured row for INSERT INTO dbo.LobOffRowTest (Id, Note)
+        // VALUES (1, N'OFFROW-SENTINEL-1234567890') after sp_tableoption
+        // forced Note off-row. The offset-array entry for Note is 0x801F -
+        // bit 0x8000 is SQL Server's "complex column" flag marking an
+        // off-row/pointer structure (16 bytes, independent of the LOB's
+        // actual content length - also verified against a 5000-char value
+        // producing the identical shape), not length-prefixed text.
+        //
+        // Before this fix, treating 0x801F as a plain cumulative offset
+        // computed a length that ran past the end of the row and threw,
+        // which the outer catch in Decode wrapped as
+        // UnsupportedRowFormatException and discarded the ENTIRE row -
+        // including the perfectly decodable Id column. Real customer
+        // impact: DECISION.StockDecisionDaily's free-text reason/note
+        // columns (nvarchar(max)) caused every single row to be silently
+        // dropped from Undo/Replay/SQL export (matched 1589601 events, 0
+        // bytes of output).
+        byte[] row = Convert.FromHexString(
+            "30000800010000000200BC01001F8000009165000000008802000001000000");
+
+        var result = RowDecoder.Decode(row, LobOffRowSchema);
+
+        Assert.Equal(1, result["Id"]);
+        Assert.Equal("<off-row value, not decoded>", result["Note"]);
+    }
+
+    [Fact]
+    public void Decode_OffRowLobColumn_NotLastVariableColumn_ChainsOffsetCorrectly()
+    {
+        // Real captured row for INSERT INTO dbo.LobNotLastTest (Note, Tag)
+        // VALUES (N'OFFROW-NOT-LAST-SENTINEL', N'tag-value') - Note (off-row)
+        // is declared BEFORE Tag (in-row), unlike the single-column test
+        // above. Confirms the masked offset chains correctly into a
+        // following real column: without unconditionally using the masked
+        // value as prevEnd, Tag's length would be computed from the raw
+        // (unmasked, ~32768-biased) offset and misdecode or throw.
+        byte[] row = Convert.FromHexString(
+            "3000080001000000030000020021803300000094650000000098020000010000007400610067002D00760061006C0075006500");
+
+        var result = RowDecoder.Decode(row, LobNotLastSchema);
+
+        Assert.Equal(1, result["Id"]);
+        Assert.Equal("<off-row value, not decoded>", result["Note"]);
+        Assert.Equal("tag-value", result["Tag"]);
+    }
+
+    [Fact]
+    public void Decode_TwoOffRowLobColumns_BothMarkedNotDecoded()
+    {
+        // Real captured row for INSERT INTO dbo.LobTwoOffRowTest (NoteA, NoteB)
+        // VALUES (N'FIRST-OFFROW-SENTINEL', N'SECOND-OFFROW-SENTINEL'), both
+        // forced off-row - two consecutive complex-column offset-array
+        // entries in the same row, confirming the masked offset chains
+        // correctly from one off-row column into the next.
+        byte[] row = Convert.FromHexString(
+            "30000800010000000300000200218031800000956500000000A8020000010000000000966500000000A802000001000100");
+
+        var result = RowDecoder.Decode(row, LobTwoOffRowSchema);
+
+        Assert.Equal(1, result["Id"]);
+        Assert.Equal("<off-row value, not decoded>", result["NoteA"]);
+        Assert.Equal("<off-row value, not decoded>", result["NoteB"]);
     }
 }
