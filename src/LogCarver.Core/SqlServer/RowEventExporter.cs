@@ -1,25 +1,75 @@
 using System.Globalization;
-using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 
 namespace LogCarver.Core.SqlServer;
 
 /// <summary>
-/// Serializes reconstructed row events to CSV or JSON for handing off to
-/// audit/ticketing systems - the console output is for a human reading it
-/// live, not for piping elsewhere.
+/// Serializes reconstructed row events to CSV, a .sql script, or JSON for
+/// handing off to audit/ticketing systems - the console output is for a
+/// human reading it live, not for piping elsewhere.
+///
+/// The Write* methods stream directly to a TextWriter and are the
+/// memory-safe path for a real table's full history: writing one event at
+/// a time never holds more than one event's rendered text in memory at
+/// once. The To* methods are thin StringWriter-backed wrappers kept for
+/// tests and other small-scale/in-memory callers (e.g. an HTTP response
+/// body) - do NOT use them against a real multi-million-row table export.
+/// Confirmed via a real customer table (DECISION.StockDecisionDaily,
+/// ~1.59M events, --undo --replay --export sql): building the entire
+/// output as one string/StringBuilder before writing it out threw
+/// "Insufficient memory to continue the execution of the program" on a
+/// 32GB machine with ~16GB free - very likely hitting .NET's ~2GB
+/// single-object/array size ceiling on the final string, not a true
+/// system-memory shortage (a List of ~1.59M RowEvent/LogRecord objects,
+/// while large, isn't one contiguous multi-GB array the way a giant string
+/// or StringBuilder's internal buffer is).
 /// </summary>
 public static class RowEventExporter
 {
+    /// <summary>
+    /// Writes to a temp file beside <paramref name="path"/> (same
+    /// directory, so the final move is a same-volume rename and thus
+    /// atomic - never a slower, non-atomic cross-volume copy) via
+    /// <paramref name="write"/>, then moves it to <paramref name="path"/>
+    /// only on success. If <paramref name="write"/> throws partway through
+    /// (a decode error deep in a multi-million-event stream, a disk-full
+    /// IOException mid-write, etc.), the temp file is deleted rather than
+    /// left behind or moved into place - the destination path either
+    /// doesn't exist or holds a complete, valid export, never a silently
+    /// truncated one. The old buffer-everything-then-write-once approach
+    /// got this property for free (nothing was written until the whole
+    /// string existed); streaming for memory safety loses that unless this
+    /// helper does it explicitly instead.
+    /// </summary>
+    public static T WriteFileAtomically<T>(string path, Func<TextWriter, T> write)
+    {
+        string tempPath = path + ".tmp";
+        try
+        {
+            T result;
+            using (var writer = new StreamWriter(tempPath))
+            {
+                result = write(writer);
+            }
+            File.Move(tempPath, path, overwrite: true);
+            return result;
+        }
+        catch
+        {
+            try { File.Delete(tempPath); } catch { /* best-effort cleanup; surface the original exception, not a cleanup failure */ }
+            throw;
+        }
+    }
+
     /// <summary>
     /// One column per observed table column, prefixed Before_/After_ (not
     /// a single flattened "Col=Value, Col2=Value2" cell) so the result is
     /// directly usable in a spreadsheet - pivoting or filtering by one
     /// column's value doesn't work if every column is jammed into one cell.
     /// </summary>
-    public static string ToCsv(
-        IReadOnlyList<RowEvent> events, IReadOnlyList<ColumnSchema> schema, string tableName,
+    public static void WriteCsv(
+        TextWriter writer, IEnumerable<RowEvent> events, IReadOnlyList<ColumnSchema> schema, string tableName,
         bool includeUndoSql, bool includeReplaySql)
     {
         var columns = schema.Select(c => c.Name).ToList();
@@ -31,8 +81,8 @@ public static class RowEventExporter
         if (includeUndoSql) header.Add("UndoSql");
         if (includeReplaySql) header.Add("ReplaySql");
 
-        var sb = new StringBuilder();
-        sb.Append(string.Join(",", header.Select(CsvEscape))).Append("\r\n");
+        writer.Write(string.Join(",", header.Select(CsvEscape)));
+        writer.Write("\r\n");
 
         foreach (var e in events)
         {
@@ -47,9 +97,18 @@ public static class RowEventExporter
             row.Add(e.Note ?? "");
             if (includeUndoSql) row.Add(UndoSqlGenerator.Generate(e, tableName) ?? "");
             if (includeReplaySql) row.Add(ReplaySqlGenerator.Generate(e, tableName) ?? "");
-            sb.Append(string.Join(",", row.Select(CsvEscape))).Append("\r\n");
+            writer.Write(string.Join(",", row.Select(CsvEscape)));
+            writer.Write("\r\n");
         }
-        return sb.ToString();
+    }
+
+    public static string ToCsv(
+        IEnumerable<RowEvent> events, IReadOnlyList<ColumnSchema> schema, string tableName,
+        bool includeUndoSql, bool includeReplaySql)
+    {
+        var sw = new StringWriter();
+        WriteCsv(sw, events, schema, tableName, includeUndoSql, includeReplaySql);
+        return sw.ToString();
     }
 
     /// <summary>
@@ -57,39 +116,57 @@ public static class RowEventExporter
     /// the source event (LSN/timestamp/kind) followed by its Undo and/or
     /// Replay statement. Caller must request at least one of the two -
     /// a script with only comment lines isn't a useful export.
+    /// Returns the number of events that actually produced a statement, so
+    /// a caller can tell "wrote an empty script because every event was
+    /// unsupported" apart from "wrote a real script" without re-reading
+    /// whatever it just streamed the output to.
     /// </summary>
-    public static string ToSql(
-        IReadOnlyList<RowEvent> events, string tableName, bool includeUndoSql, bool includeReplaySql)
+    public static int WriteSql(TextWriter writer, IEnumerable<RowEvent> events, string tableName, bool includeUndoSql, bool includeReplaySql)
     {
-        var sb = new StringBuilder();
+        int produced = 0;
         foreach (var e in events)
         {
             string? undoSql = includeUndoSql ? UndoSqlGenerator.Generate(e, tableName) : null;
             string? replaySql = includeReplaySql ? ReplaySqlGenerator.Generate(e, tableName) : null;
             if (undoSql is null && replaySql is null)
                 continue;
+            produced++;
 
             string when = e.Timestamp?.ToString("yyyy-MM-dd HH:mm:ss.fff", CultureInfo.InvariantCulture) ?? "time unknown";
-            sb.Append($"-- [{e.Lsn} {when}] {e.Kind.ToString().ToUpperInvariant()}").Append('\n');
-            if (undoSql is not null) sb.Append("-- UNDO\n").Append(undoSql).Append('\n');
-            if (replaySql is not null) sb.Append("-- REPLAY\n").Append(replaySql).Append('\n');
-            sb.Append('\n');
+            writer.Write($"-- [{e.Lsn} {when}] {e.Kind.ToString().ToUpperInvariant()}");
+            writer.Write('\n');
+            if (undoSql is not null) { writer.Write("-- UNDO\n"); writer.Write(undoSql); writer.Write('\n'); }
+            if (replaySql is not null) { writer.Write("-- REPLAY\n"); writer.Write(replaySql); writer.Write('\n'); }
+            writer.Write('\n');
         }
-        return sb.ToString();
+        return produced;
+    }
+
+    public static string ToSql(IEnumerable<RowEvent> events, string tableName, bool includeUndoSql, bool includeReplaySql)
+    {
+        var sw = new StringWriter();
+        WriteSql(sw, events, tableName, includeUndoSql, includeReplaySql);
+        return sw.ToString();
     }
 
     /// <summary>
-    /// Built with System.Text.Json.Nodes (JsonObject/JsonArray/JsonValue)
-    /// rather than JsonSerializer.Serialize&lt;T&gt; against a POCO -
-    /// LogCarverOffline.Cli is PublishAot, which disables the
-    /// reflection-based serializer this method used to rely on, and the
-    /// row values here are a bag of `object?` with no fixed shape a
-    /// source-generated JsonSerializerContext could describe. JsonNode's
-    /// own writer is hand-coded, not reflection, so it works under AOT.
+    /// Built with System.Text.Json.Nodes (JsonObject/JsonValue) rather than
+    /// JsonSerializer.Serialize&lt;T&gt; against a POCO - LogCarverOffline.Cli
+    /// is PublishAot, which disables the reflection-based serializer this
+    /// method used to rely on, and the row values here are a bag of
+    /// `object?` with no fixed shape a source-generated JsonSerializerContext
+    /// could describe. JsonNode's own writer is hand-coded, not reflection,
+    /// so it works under AOT.
+    ///
+    /// Written as one compact JSON object per line inside the array
+    /// brackets, not a single JsonArray.ToJsonString() call over every
+    /// event - the whole point of streaming is to never hold more than one
+    /// event's rendered JSON in memory at a time.
     /// </summary>
-    public static string ToJson(IReadOnlyList<RowEvent> events, string tableName, bool includeUndoSql, bool includeReplaySql)
+    public static void WriteJson(TextWriter writer, IEnumerable<RowEvent> events, string tableName, bool includeUndoSql, bool includeReplaySql)
     {
-        var array = new JsonArray();
+        writer.Write('[');
+        bool first = true;
         foreach (var e in events)
         {
             var obj = new JsonObject
@@ -103,16 +180,18 @@ public static class RowEventExporter
                 ["UndoSql"] = includeUndoSql ? UndoSqlGenerator.Generate(e, tableName) : null,
                 ["ReplaySql"] = includeReplaySql ? ReplaySqlGenerator.Generate(e, tableName) : null,
             };
-            // Not array.Add(obj): JsonArray.Add<T>(T) is an exact-type
-            // generic match, so plain overload resolution picks it over
-            // the non-generic Add(JsonNode?) - and that generic overload
-            // needs runtime codegen for a non-primitive T, which is exactly
-            // what PublishAot's trim/AOT analysis (IL2026/IL3050) flagged
-            // building this project. The explicit cast forces the
-            // non-generic, reflection-free overload instead.
-            array.Add((JsonNode?)obj);
+            writer.Write(first ? "\n" : ",\n");
+            first = false;
+            writer.Write(obj.ToJsonString());
         }
-        return array.ToJsonString(new JsonSerializerOptions { WriteIndented = true });
+        writer.Write(first ? "]" : "\n]");
+    }
+
+    public static string ToJson(IEnumerable<RowEvent> events, string tableName, bool includeUndoSql, bool includeReplaySql)
+    {
+        var sw = new StringWriter();
+        WriteJson(sw, events, tableName, includeUndoSql, includeReplaySql);
+        return sw.ToString();
     }
 
     private static JsonObject? ToJsonObject(IReadOnlyDictionary<string, object?>? row)

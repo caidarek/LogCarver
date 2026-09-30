@@ -272,18 +272,33 @@ static async Task<int> RunAsync(string server, string database, string tableName
 
     if (options.ExportFormat is not null)
     {
-        string content = options.ExportFormat == "csv"
-            ? RowEventExporter.ToCsv(toShow, schema, tableName, options.ShowUndoSql, options.ShowReplaySql)
-            : RowEventExporter.ToJson(toShow, tableName, options.ShowUndoSql, options.ShowReplaySql);
+        // Streams directly to the destination instead of building the
+        // whole export as one in-memory string first - see
+        // RowEventExporter's class doc comment for why (a real customer
+        // table's full history hit .NET's ~2GB single-object size ceiling
+        // building one giant string, via this same code path in the
+        // sibling LogCarverOffline.Cli). Writing to a real file goes
+        // through WriteFileAtomically so a decode error or disk-full
+        // partway through never leaves a truncated file at the requested
+        // path - streaming loses the old buffer-everything approach's
+        // free "nothing written until it all succeeded" property, so this
+        // gets it back explicitly instead.
+        void WriteTo(TextWriter writer)
+        {
+            if (options.ExportFormat == "csv")
+                RowEventExporter.WriteCsv(writer, toShow, schema, tableName, options.ShowUndoSql, options.ShowReplaySql);
+            else
+                RowEventExporter.WriteJson(writer, toShow, tableName, options.ShowUndoSql, options.ShowReplaySql);
+        }
 
         if (options.OutputPath is not null)
         {
-            await File.WriteAllTextAsync(options.OutputPath, content);
+            RowEventExporter.WriteFileAtomically<object?>(options.OutputPath, writer => { WriteTo(writer); return null; });
             Console.WriteLine($"Wrote {toShow.Count} row event(s) for {tableName} to {options.OutputPath}.");
         }
         else
         {
-            Console.Write(content);
+            WriteTo(Console.Out);
         }
         return 0;
     }

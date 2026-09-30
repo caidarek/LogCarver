@@ -167,4 +167,44 @@ public class RowEventExporterTests
         Assert.Contains("INSERT INTO [dbo].[Orders]", first.GetProperty("UndoSql").GetString());
         Assert.Equal(JsonValueKind.Null, first.GetProperty("ReplaySql").ValueKind);
     }
+
+    /// <summary>
+    /// Yields once then throws on any further enumeration attempt - proves
+    /// a caller genuinely single-pass-streaming a real record source (e.g.
+    /// records read incrementally from a multi-GB .ldf) works correctly.
+    /// If WriteCsv/WriteSql/WriteJson ever regressed to enumerating twice
+    /// (e.g. a `.Count()` added for some future feature), this fails loudly
+    /// instead of silently doubling cost or skipping half the data.
+    /// </summary>
+    private sealed class SinglePassEvents(RowEvent evt) : IEnumerable<RowEvent>
+    {
+        private bool _consumed;
+
+        public IEnumerator<RowEvent> GetEnumerator()
+        {
+            if (_consumed) throw new InvalidOperationException("Enumerated more than once - not single-pass-safe.");
+            _consumed = true;
+            yield return evt;
+        }
+
+        System.Collections.IEnumerator System.Collections.IEnumerable.GetEnumerator() => GetEnumerator();
+    }
+
+    [Fact]
+    public void WriteCsv_WriteSql_WriteJson_OnlyEnumerateEventsOnce()
+    {
+        var evt = MakeEvent(RowEventKind.Insert, null, Row(5, "hello"));
+
+        var csvWriter = new StringWriter();
+        RowEventExporter.WriteCsv(csvWriter, new SinglePassEvents(evt), Schema, "dbo.Orders", includeUndoSql: false, includeReplaySql: false);
+        Assert.Contains(",5,hello,", csvWriter.ToString());
+
+        var sqlWriter = new StringWriter();
+        int produced = RowEventExporter.WriteSql(sqlWriter, new SinglePassEvents(evt), "dbo.Orders", includeUndoSql: true, includeReplaySql: false);
+        Assert.Equal(1, produced);
+
+        var jsonWriter = new StringWriter();
+        RowEventExporter.WriteJson(jsonWriter, new SinglePassEvents(evt), "dbo.Orders", includeUndoSql: false, includeReplaySql: false);
+        Assert.Contains("\"Lsn\":\"0001:0002:0003\"", jsonWriter.ToString());
+    }
 }
