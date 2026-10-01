@@ -2,6 +2,8 @@ using LogCarver.Core.SqlServer;
 using Microsoft.Data.SqlClient;
 
 const string OfflineWaitlistContact = "logcarveroffline@gmail.com";
+const string OfflinePurchaseUrl = "https://buy.polar.sh/polar_cl_tEgu9FbaX6cGO3dorFdFUPp8kK9F32RVHG5op1Gavh1";
+const string OfflineTrialUrl = "https://buy.polar.sh/polar_cl_OOcUPxj6yjJYwHRYqBrMixDGa3r3HVapldYVu4PtSeW";
 
 if (args.Length == 0 || args[0] is "-h" or "--help" or "-?")
 {
@@ -345,8 +347,10 @@ static async Task<int> RunAsync(string server, string database, string tableName
         Console.WriteLine("fn_dblog found nothing for this table. This usually means the relevant VLF has already");
         Console.WriteLine("been marked reusable and rotated past - the data may still be physically present in the");
         Console.WriteLine(".ldf file even though SQL Server itself can no longer report it. LogCarverOffline reads");
-        Console.WriteLine("the raw .ldf bytes directly and can often recover exactly this case. Not yet available -");
-        Console.WriteLine($"email {OfflineWaitlistContact} to be notified when it ships.");
+        Console.WriteLine("the raw .ldf bytes directly and can often recover exactly this case.");
+        Console.WriteLine($"Free trial (no license, first 10 events): {OfflineTrialUrl}");
+        Console.WriteLine($"Purchase: {OfflinePurchaseUrl}");
+        Console.WriteLine($"Questions: {OfflineWaitlistContact}");
     }
 
     Console.WriteLine();

@@ -25,7 +25,7 @@ Grab the latest self-contained `LogCarver.exe` from the [Releases page](https://
 - **Column types currently decoded: `int`, `datetime2(3)`/`datetime2(4)`, `char`, `nchar`, `varchar`, `nvarchar`.** Any other type (`decimal`/`numeric`/`money`, `bigint`/`smallint`/`tinyint`, `bit`, `float`/`real`, `date`/`time`, `datetime2` at other scales, `uniqueidentifier`, etc.) is explicitly refused, not guessed — you'll see `not shown - ... is not implemented yet` for those rows. More types are on the roadmap; check before relying on this for a table with financial (`decimal`/`money`) columns today.
 - Also explicitly detected and refused rather than guessed at: compressed tables (ROW/PAGE), off-row LOB values, records predating a schema-changing DDL
 - **Known over-refusal, not a wrong-data risk:** `TRUNCATE TABLE` produces the same kind of log record (`LOP_HOBT_DDL`) as a real schema-changing `ALTER TABLE`, and the two aren't currently distinguished — so a `TRUNCATE` gets treated as a schema boundary, and every event before it gets refused too, even though `TRUNCATE` never actually changes column layout. The refused history is real and decodable; this tool just doesn't show it yet.
-- Not yet implemented: offline `.ldf` file analysis — recovering data `fn_dblog` can no longer see but that hasn't been physically overwritten yet. This is the tool's core differentiator and is planned as a paid tier; see [Offline recovery](#offline-recovery-coming-soon) below.
+- Offline `.ldf` file analysis — recovering data `fn_dblog` can no longer see but that hasn't been physically overwritten yet — isn't part of this free tool. That's the paid **LogCarverOffline**'s differentiator; see [Offline recovery](#offline-recovery) below.
 
 ## Disclaimer
 
@@ -68,9 +68,9 @@ Concretely: a table in a SIMPLE-recovery database gets a row deleted, then LogCa
 
 The important nuance: "marked reusable" is not the same as "physically overwritten." The bytes may still be sitting untouched in the `.ldf` file — SQL Server just isn't telling you about them anymore. That gap between what `fn_dblog` reports and what's still physically recoverable is exactly what **LogCarverOffline** (below) is built to close.
 
-## Offline recovery (coming soon)
+## Offline recovery
 
-If `fn_dblog` reports nothing for a table, that usually means the relevant VLF has already been marked reusable and rotated past — but the data may still be physically present in the `.ldf` file. **LogCarverOffline**, a paid tool built on the same decode engine, reads raw `.ldf` bytes directly and can often recover exactly this case, even after the database has gone offline or been detached. Not available yet — email `logcarveroffline@gmail.com` to be notified when it ships.
+If `fn_dblog` reports nothing for a table, that usually means the relevant VLF has already been marked reusable and rotated past — but the data may still be physically present in the `.ldf` file. **[LogCarverOffline](https://buy.polar.sh/polar_cl_tEgu9FbaX6cGO3dorFdFUPp8kK9F32RVHG5op1Gavh1)**, a paid tool built on the same decode engine, reads raw `.ldf` bytes directly and can often recover exactly this case, even after the database has gone offline or been detached. [Free trial](https://buy.polar.sh/polar_cl_OOcUPxj6yjJYwHRYqBrMixDGa3r3HVapldYVu4PtSeW) available (no license, first 10 recovered events) — confirm it can find your data before buying. Questions: `logcarveroffline@gmail.com`.
 
 ## Building from source
 

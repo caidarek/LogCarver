@@ -25,7 +25,7 @@ SQL Server 交易記錄檔解析工具 —— 直接從交易記錄檔讀出 ins
 - **目前能解碼的欄位型別:`int`、`datetime2(3)`/`datetime2(4)`、`char`、`nchar`、`varchar`、`nvarchar`。** 其他型別(`decimal`/`numeric`/`money`、`bigint`/`smallint`/`tinyint`、`bit`、`float`/`real`、`date`/`time`、其他精度的 `datetime2`、`uniqueidentifier` 等)會明確拒絕解碼,不會用猜的 —— 這些欄位所在的列會顯示 `not shown - ... is not implemented yet`。更多型別在規劃中;如果你的表有財務相關的 `decimal`/`money` 欄位,今天先不要完全依賴這個工具。
 - 同樣採取「明確偵測並拒絕、而非用猜的」原則:壓縮表(ROW/PAGE)、off-row LOB 欄位、早於某次改表結構(schema-changing DDL)的舊紀錄
 - **已知的「過度拒絕」限制,不是解錯資料的風險**:`TRUNCATE TABLE` 產生的 log 紀錄類型(`LOP_HOBT_DDL`)跟真正改變欄位結構的 `ALTER TABLE` 是同一種,目前工具分不出兩者的差別——所以 `TRUNCATE` 會被當成改表結構的邊界,連帶讓它之前所有事件都被拒絕顯示,即使 `TRUNCATE` 根本沒有改變欄位配置。那些被拒絕的歷史紀錄其實是可以正確解碼的,只是這個工具現在還沒把它們秀出來。
-- 尚未實作:離線解析 `.ldf` 檔案 —— 救回 `fn_dblog` 已經看不到、但實體上還沒被覆寫的資料。這是這個工具真正的差異化能力,規劃中會做成付費版,詳見下方[離線救援(即將推出)](#離線救援即將推出)。
+- 離線解析 `.ldf` 檔案(救回 `fn_dblog` 已經看不到、但實體上還沒被覆寫的資料)不包含在這個免費工具裡——這是付費版 **LogCarverOffline** 的差異化能力,詳見下方[離線救援](#離線救援)。
 
 ## 免責聲明
 
@@ -68,9 +68,9 @@ LogCarver.exe localhost MyDatabase dbo.Orders --user sa --password "..."
 
 關鍵在於:「標記為可重用」跟「已經被實體覆寫」是兩回事。位元組很可能原封不動地還躺在 `.ldf` 檔案裡,只是 SQL Server 不再讓你看到而已。`fn_dblog` 看得到的範圍,跟實際上還救得回來的範圍,兩者之間的落差就是下面 **LogCarverOffline** 要補上的地方。
 
-## 離線救援(即將推出)
+## 離線救援
 
-如果 `fn_dblog` 對某張表什麼都查不到,通常代表相關的 VLF 已經被標記為可重用、視窗已經滾過去了 —— 但資料很可能實體上還留在 `.ldf` 檔案裡。**LogCarverOffline** 是建構在同一套解碼引擎上的付費工具,直接讀取 `.ldf` 原始位元組,即使資料庫已經離線或 detach,通常仍能救回這種情況。目前還沒開賣 —— 想在上線時收到通知,可以寄信到 `logcarveroffline@gmail.com`。
+如果 `fn_dblog` 對某張表什麼都查不到,通常代表相關的 VLF 已經被標記為可重用、視窗已經滾過去了 —— 但資料很可能實體上還留在 `.ldf` 檔案裡。**[LogCarverOffline](https://buy.polar.sh/polar_cl_tEgu9FbaX6cGO3dorFdFUPp8kK9F32RVHG5op1Gavh1)** 是建構在同一套解碼引擎上的付費工具,直接讀取 `.ldf` 原始位元組,即使資料庫已經離線或 detach,通常仍能救回這種情況。提供[免費試用版](https://buy.polar.sh/polar_cl_OOcUPxj6yjJYwHRYqBrMixDGa3r3HVapldYVu4PtSeW)(不用序號,可看前 10 筆救回的事件)——先確認救得回你要的資料再購買。有問題可以寄信到 `logcarveroffline@gmail.com`。
 
 ## 從原始碼建置
 
