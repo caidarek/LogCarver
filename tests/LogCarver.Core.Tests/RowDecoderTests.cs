@@ -627,4 +627,61 @@ public class RowDecoderTests
         Assert.Equal("RUNNING", result["Status"]);
         Assert.Equal(new DateTime(2026, 9, 30, 20, 19, 45, 381), ((DateTime)result["CreateDate"]!), TimeSpan.FromMilliseconds(1));
     }
+
+    // dbo.NewTypesTest: Id INT, TinyIntCol TINYINT, SmallIntCol SMALLINT,
+    // BitCol1 BIT, BitCol2 BIT, GuidCol UNIQUEIDENTIFIER, MoneyCol MONEY,
+    // SmallMoneyCol SMALLMONEY, DateTimeCol DATETIME, SmallDateTimeCol
+    // SMALLDATETIME, FloatCol FLOAT, RealCol REAL - added to close the gap
+    // found via a real customer table (DECISION.FUNDAMENTAL.MonthlyRevenue,
+    // RevenueYear SMALLINT) where every single row was lost, flagged
+    // NeedsManualReview with "system_type_id 52 is not implemented yet."
+    // BitCol1/BitCol2 share one LeafOffset (bit-packing, verified real: both
+    // columns reported the identical leaf_offset from
+    // sys.system_internals_partition_columns, distinguished only by bit
+    // position within that byte).
+    private static readonly IReadOnlyList<ColumnSchema> NewTypesSchema =
+    [
+        new ColumnSchema("Id", 1, LeafOffset: 4, LeafNullBit: 1, MaxLength: 4, SystemTypeId: 56),
+        new ColumnSchema("TinyIntCol", 2, LeafOffset: 8, LeafNullBit: 2, MaxLength: 1, SystemTypeId: 48),
+        new ColumnSchema("SmallIntCol", 3, LeafOffset: 9, LeafNullBit: 3, MaxLength: 2, SystemTypeId: 52),
+        new ColumnSchema("BitCol1", 4, LeafOffset: 11, LeafNullBit: 4, MaxLength: 1, SystemTypeId: 104),
+        new ColumnSchema("BitCol2", 5, LeafOffset: 11, LeafNullBit: 5, MaxLength: 1, SystemTypeId: 104),
+        new ColumnSchema("GuidCol", 6, LeafOffset: 12, LeafNullBit: 6, MaxLength: 16, SystemTypeId: 36),
+        new ColumnSchema("MoneyCol", 7, LeafOffset: 28, LeafNullBit: 7, MaxLength: 8, SystemTypeId: 60, Scale: 4),
+        new ColumnSchema("SmallMoneyCol", 8, LeafOffset: 36, LeafNullBit: 8, MaxLength: 4, SystemTypeId: 122, Scale: 4),
+        new ColumnSchema("DateTimeCol", 9, LeafOffset: 40, LeafNullBit: 9, MaxLength: 8, SystemTypeId: 61),
+        new ColumnSchema("SmallDateTimeCol", 10, LeafOffset: 48, LeafNullBit: 10, MaxLength: 4, SystemTypeId: 58),
+        new ColumnSchema("FloatCol", 11, LeafOffset: 52, LeafNullBit: 11, MaxLength: 8, SystemTypeId: 62),
+        new ColumnSchema("RealCol", 12, LeafOffset: 60, LeafNullBit: 12, MaxLength: 4, SystemTypeId: 59),
+    ];
+
+    [Fact]
+    public void Decode_NewlySupportedFixedTypes_MatchGroundTruth()
+    {
+        // Captured from fn_dblog against a real SQL Server 2025 instance;
+        // inserted values: TinyIntCol=200, SmallIntCol=-12345, BitCol1=1,
+        // BitCol2=0, GuidCol='12345678-1234-5678-9ABC-123456789ABC',
+        // MoneyCol=123456.7890, SmallMoneyCol=-321.12,
+        // DateTimeCol='2026-05-17 13:45:30.123',
+        // SmallDateTimeCol='2026-05-17 13:45:00', FloatCol=3.14159265358979,
+        // RealCol=2.71828 - every field hand-verified byte-for-byte before
+        // being used here as a regression baseline.
+        byte[] row = Convert.FromHexString(
+            "1000400001000000C8C7CFD578563412341278569ABC123456789ABCD2029649000000004000CFFF1DBBE2004DB4000039034DB4112D4454FB2109404DF82D400C000000");
+
+        var result = RowDecoder.Decode(row, NewTypesSchema);
+
+        Assert.Equal(1, result["Id"]);
+        Assert.Equal((byte)200, result["TinyIntCol"]);
+        Assert.Equal((short)-12345, result["SmallIntCol"]);
+        Assert.Equal(true, result["BitCol1"]);
+        Assert.Equal(false, result["BitCol2"]);
+        Assert.Equal(Guid.Parse("12345678-1234-5678-9ABC-123456789ABC"), result["GuidCol"]);
+        Assert.Equal(123456.7890m, result["MoneyCol"]);
+        Assert.Equal(-321.1200m, result["SmallMoneyCol"]);
+        Assert.Equal(new DateTime(2026, 5, 17, 13, 45, 30, 123), (DateTime)result["DateTimeCol"]!, TimeSpan.FromMilliseconds(4));
+        Assert.Equal(new DateTime(2026, 5, 17, 13, 45, 0), result["SmallDateTimeCol"]);
+        Assert.Equal(3.14159265358979, (double)result["FloatCol"]!, 1e-12);
+        Assert.Equal(2.71828f, (float)result["RealCol"]!, 1e-5f);
+    }
 }

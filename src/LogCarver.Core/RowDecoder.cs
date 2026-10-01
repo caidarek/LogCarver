@@ -70,6 +70,16 @@ public static class RowDecoder
     private const int TypeChar = 175;
     private const int TypeNVarChar = 231;
     private const int TypeNChar = 239;
+    private const int TypeTinyInt = 48;
+    private const int TypeSmallInt = 52;
+    private const int TypeBit = 104;
+    private const int TypeUniqueIdentifier = 36;
+    private const int TypeMoney = 60;
+    private const int TypeSmallMoney = 122;
+    private const int TypeDateTime = 61;
+    private const int TypeSmallDateTime = 58;
+    private const int TypeFloat = 62;
+    private const int TypeReal = 59;
 
     /// <summary>
     /// Decodes a row, first refusing (via <see cref="SchemaDriftException"/>)
@@ -191,6 +201,24 @@ public static class RowDecoder
         // overwrite below ever ran. Checking null first and skipping the
         // decode switch entirely for a NULL column closes this for every
         // current and future fixed-length type, not just DATETIME2.
+        // bit columns are packed, up to 8 per byte, sharing the same
+        // LeafOffset - verified byte-for-byte against a real two-bit-column
+        // row: both columns reported the identical LeafOffset, and their
+        // values occupied bit 0 and bit 1 (LSB-first) of that one byte, in
+        // ColumnId order. Precomputed once so the per-column loop below can
+        // treat a bit column like any other fixed-offset column.
+        Dictionary<string, int>? bitIndexByColumn = null;
+        {
+            var bitGroups = schema.Where(c => c.LeafOffset >= 0 && c.SystemTypeId == TypeBit)
+                                   .GroupBy(c => c.LeafOffset);
+            foreach (var group in bitGroups)
+            {
+                int i = 0;
+                foreach (var bitCol in group.OrderBy(c => c.ColumnId))
+                    (bitIndexByColumn ??= [])[bitCol.Name] = i++;
+            }
+        }
+
         foreach (var col in schema)
         {
             if (col.LeafOffset < 0) continue;
@@ -204,9 +232,19 @@ public static class RowDecoder
             {
                 TypeInt => BitConverter.ToInt32(row.Slice(col.LeafOffset, 4)),
                 TypeBigInt => BitConverter.ToInt64(row.Slice(col.LeafOffset, 8)),
+                TypeSmallInt => BitConverter.ToInt16(row.Slice(col.LeafOffset, 2)),
+                TypeTinyInt => row[col.LeafOffset],
+                TypeBit => ((row[col.LeafOffset] >> bitIndexByColumn![col.Name]) & 1) != 0,
+                TypeUniqueIdentifier => new Guid(row.Slice(col.LeafOffset, 16)),
                 TypeDate => DecodeDate(row, col.LeafOffset),
                 TypeDateTime2 => DecodeDateTime2(row, col.LeafOffset, col.MaxLength, col.Scale),
+                TypeDateTime => DecodeDateTime(row, col.LeafOffset),
+                TypeSmallDateTime => DecodeSmallDateTime(row, col.LeafOffset),
                 TypeDecimal or TypeNumeric => DecodeDecimal(row, col.LeafOffset, col.MaxLength, col.Scale),
+                TypeMoney => BitConverter.ToInt64(row.Slice(col.LeafOffset, 8)) / 10000m,
+                TypeSmallMoney => BitConverter.ToInt32(row.Slice(col.LeafOffset, 4)) / 10000m,
+                TypeFloat => BitConverter.ToDouble(row.Slice(col.LeafOffset, 8)),
+                TypeReal => BitConverter.ToSingle(row.Slice(col.LeafOffset, 4)),
                 // char/nchar are fixed-length in-row, always stored padded
                 // with spaces (0x20 / U+0020) out to the declared length -
                 // decoded as-is, without trimming, to match what a live
@@ -388,6 +426,45 @@ public static class RowDecoder
         row.Slice(offset, 3).CopyTo(dateBuf);
         uint days = BitConverter.ToUInt32(dateBuf);
         return new DateTime(1, 1, 1, 0, 0, 0, DateTimeKind.Unspecified).AddDays(days);
+    }
+
+    /// <summary>
+    /// Legacy DATETIME (8 bytes), unrelated to DATETIME2's encoding -
+    /// verified byte-for-byte against a real captured row: the FIRST 4
+    /// bytes are a little-endian signed int counting 1/300-second ticks
+    /// since midnight (SQL Server's well-known ~3.33ms rounding), the LAST
+    /// 4 bytes are a little-endian signed int counting days since
+    /// 1900-01-01 (negative for dates before 1900) - the sub-day component
+    /// comes first, same ordering DATE/DATETIME2 use for their own day
+    /// count relative to the time part.
+    /// </summary>
+    private static DateTime DecodeDateTime(ReadOnlySpan<byte> row, int offset)
+    {
+        int ticks = BitConverter.ToInt32(row.Slice(offset, 4));
+        int days = BitConverter.ToInt32(row.Slice(offset + 4, 4));
+        // Multiply before dividing - TicksPerSecond (10,000,000) isn't evenly
+        // divisible by 300, so dividing first truncates to 33333 instead of
+        // 33333.33 and accumulates a real, visible drift (~0.5s off at
+        // ~14.8M ticks, caught by this test's own assertion).
+        return new DateTime(1900, 1, 1, 0, 0, 0, DateTimeKind.Unspecified)
+            .AddDays(days)
+            .AddTicks((long)ticks * TimeSpan.TicksPerSecond / 300);
+    }
+
+    /// <summary>
+    /// SMALLDATETIME (4 bytes) - verified byte-for-byte against a real
+    /// captured row: FIRST 2 bytes are a little-endian uint16 counting
+    /// minutes since midnight (no seconds - SMALLDATETIME's whole-minute
+    /// precision), LAST 2 bytes are a little-endian uint16 counting days
+    /// since 1900-01-01. Same sub-day-component-first ordering as DATETIME.
+    /// </summary>
+    private static DateTime DecodeSmallDateTime(ReadOnlySpan<byte> row, int offset)
+    {
+        ushort minutes = BitConverter.ToUInt16(row.Slice(offset, 2));
+        ushort days = BitConverter.ToUInt16(row.Slice(offset + 2, 2));
+        return new DateTime(1900, 1, 1, 0, 0, 0, DateTimeKind.Unspecified)
+            .AddDays(days)
+            .AddMinutes(minutes);
     }
 
     /// <summary>

@@ -19,9 +19,11 @@ namespace LogCarver.Core;
 /// </param>
 /// <param name="MaxLength">Declared max length in bytes.</param>
 /// <param name="SystemTypeId">
-/// sys.types.system_type_id. Only 56 (int), 40 (date), 42 (datetime2),
-/// 106/108 (decimal/numeric), 167 (varchar), 231 (nvarchar), 175 (char),
-/// 239 (nchar) are currently decoded.
+/// sys.types.system_type_id. Decoded: 56 (int), 127 (bigint), 48 (tinyint),
+/// 52 (smallint), 104 (bit), 36 (uniqueidentifier), 40 (date),
+/// 42 (datetime2), 61 (datetime), 58 (smalldatetime), 106/108
+/// (decimal/numeric), 60 (money), 122 (smallmoney), 62 (float), 59 (real),
+/// 167 (varchar), 231 (nvarchar), 175 (char), 239 (nchar).
 /// </param>
 /// <param name="Scale">
 /// sys.columns.scale. Meaningful for decimal/numeric (digits after this
