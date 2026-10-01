@@ -10,7 +10,8 @@ public sealed record RowEvent(
     string? Note,
     DateTime? Timestamp,
     string PageId,
-    int SlotId)
+    int SlotId,
+    string? TransactionId = null)
 {
     /// <summary>
     /// True whenever this event's data should not be trusted as-is without
@@ -105,7 +106,7 @@ public static class RowHistoryReconstructor
                         var decoded = TryDecode(bytes, schema, record.Lsn, ddlBoundaryLsns,
                             record.PossiblyCorruptedOffsetsInRowLogContents0 ?? [], out var note, out var corruptedColumns);
                         if (corruptedColumns.Count > 0) note = WithNote(note, BuildColumnCorruptionNote(corruptedColumns));
-                        events.Add(new RowEvent(record.Lsn, RowEventKind.Insert, null, decoded, note, TimestampOf(record), record.PageId, record.SlotId.Value));
+                        events.Add(new RowEvent(record.Lsn, RowEventKind.Insert, null, decoded, note, TimestampOf(record), record.PageId, record.SlotId.Value, record.TransactionId));
                         state[key] = (bytes, record.Lsn, recordTouchedABoundary);
                         break;
                     }
@@ -115,7 +116,7 @@ public static class RowHistoryReconstructor
                         var decoded = TryDecode(bytes, schema, record.Lsn, ddlBoundaryLsns,
                             record.PossiblyCorruptedOffsetsInRowLogContents0 ?? [], out var note, out var corruptedColumns);
                         if (corruptedColumns.Count > 0) note = WithNote(note, BuildColumnCorruptionNote(corruptedColumns));
-                        events.Add(new RowEvent(record.Lsn, RowEventKind.Delete, decoded, null, note, TimestampOf(record), record.PageId, record.SlotId.Value));
+                        events.Add(new RowEvent(record.Lsn, RowEventKind.Delete, decoded, null, note, TimestampOf(record), record.PageId, record.SlotId.Value, record.TransactionId));
                         state.Remove(key);
                         break;
                     }
@@ -140,7 +141,7 @@ public static class RowHistoryReconstructor
                     {
                         events.Add(new RowEvent(record.Lsn, RowEventKind.Update, null, null,
                             "diff not available (LOP_MODIFY_COLUMNS is a column-level change format, not a byte-range splice - not decoded)",
-                            TimestampOf(record), record.PageId, record.SlotId.Value));
+                            TimestampOf(record), record.PageId, record.SlotId.Value, record.TransactionId));
                         state.Remove(key);
                         break;
                     }
@@ -153,7 +154,7 @@ public static class RowHistoryReconstructor
                         {
                             events.Add(new RowEvent(record.Lsn, RowEventKind.Update, null, null,
                                 WithNote("diff not available (missing offset or RowLog Contents)", recordTouchedABoundary ? UpdateCorruptionNote : null),
-                                TimestampOf(record), record.PageId, record.SlotId.Value));
+                                TimestampOf(record), record.PageId, record.SlotId.Value, record.TransactionId));
                             break;
                         }
 
@@ -161,7 +162,7 @@ public static class RowHistoryReconstructor
                         {
                             events.Add(new RowEvent(record.Lsn, RowEventKind.Update, null, null,
                                 WithNote("before image unknown - this row's insert (or a prior update) is outside the observed log window", recordTouchedABoundary ? UpdateCorruptionNote : null),
-                                TimestampOf(record), record.PageId, record.SlotId.Value));
+                                TimestampOf(record), record.PageId, record.SlotId.Value, record.TransactionId));
                             break;
                         }
 
@@ -180,7 +181,7 @@ public static class RowHistoryReconstructor
                             events.Add(new RowEvent(record.Lsn, RowEventKind.Update, null, null,
                                 WithNote($"patch failed - before image and this diff do not line up ({ex.Message})",
                                     before.PossiblyCorrupted || recordTouchedABoundary ? UpdateCorruptionNote : null),
-                                TimestampOf(record), record.PageId, record.SlotId.Value));
+                                TimestampOf(record), record.PageId, record.SlotId.Value, record.TransactionId));
                             break;
                         }
 
@@ -188,7 +189,7 @@ public static class RowHistoryReconstructor
                         var afterDecoded = TryDecode(afterBytes, schema, record.Lsn, ddlBoundaryLsns, [], out var afterNote, out _);
                         bool possiblyCorrupted = before.PossiblyCorrupted || recordTouchedABoundary;
                         string? note = WithNote(beforeNote ?? afterNote, possiblyCorrupted ? UpdateCorruptionNote : null);
-                        events.Add(new RowEvent(record.Lsn, RowEventKind.Update, beforeDecoded, afterDecoded, note, TimestampOf(record), record.PageId, record.SlotId.Value));
+                        events.Add(new RowEvent(record.Lsn, RowEventKind.Update, beforeDecoded, afterDecoded, note, TimestampOf(record), record.PageId, record.SlotId.Value, record.TransactionId));
                         state[key] = (afterBytes, record.Lsn, possiblyCorrupted);
                         break;
                     }
