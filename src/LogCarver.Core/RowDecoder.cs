@@ -41,15 +41,23 @@ namespace LogCarver.Core;
 /// was handled, treating the pointer bytes as plain length-prefixed text
 /// threw and silently dropped the entire row.
 ///
-/// Oversized in-row variable-length values: fn_dblog's own [RowLog
-/// Contents 0]/[RowLog Contents 1] columns truncate at a fixed ~8000-byte
-/// cap before this decoder ever sees the bytes - a row with a large
-/// still-in-row (not yet pushed off-row by SQL Server) value can exceed
-/// that cap, but its offset-array entry still records the real,
-/// pre-truncation end offset. Decoded as "&lt;value too large for fn_dblog
-/// to capture online, not decoded&gt;" for just that column, same as the
-/// off-row case above - not a decode bug and not recoverable from this
-/// buffer, since fn_dblog itself never delivered those bytes.
+/// Row buffer shorter than its own offset array implies: the row's
+/// embedded variable-length offset-array entry can point past the end of
+/// the bytes this decoder actually received. One confirmed cause: fn_dblog's
+/// own [RowLog Contents 0]/[RowLog Contents 1] columns truncate at a fixed
+/// ~8000-byte cap (verified byte-for-byte - a row whose true size should be
+/// ~8039 bytes per its own header/offset-array math arrived here at exactly
+/// 8000). Also observed via the offline (direct-.ldf-read) path on a row
+/// with no large column at all, so there is at least one other, not yet
+/// identified cause - this decoder has no way to know which source (fn_dblog
+/// vs. raw .ldf bytes) produced its input, so it never guesses a cause.
+/// Decoded as "&lt;value's byte range exceeds what was captured for this
+/// row - not decoded, see NeedsManualReview&gt;" for just that column (every
+/// other column in the row still decodes normally) and flagged
+/// NeedsManualReview, same remediation shape as the off-row case above -
+/// strictly better than the prior behavior, where reading past the buffer
+/// threw and took the entire row down via the outer catch's "likely a
+/// compressed row" guess.
 /// </summary>
 public static class RowDecoder
 {
@@ -243,27 +251,28 @@ public static class RowDecoder
                 ColumnSchema? col = i < varCols.Count ? varCols[i] : null;
                 int offsetEntryPos = offsetArrayStart + i * 2;
 
-                // fn_dblog's own [RowLog Contents 0]/[RowLog Contents 1]
-                // columns truncate at a fixed ~8000-byte cap (a long-standing
-                // SQL Server limitation - verified byte-for-byte: a row whose
-                // true, un-truncated size should be ~8039 bytes per its own
-                // header/offset-array math arrived here as exactly 8000
-                // bytes, for every affected row regardless of its other
-                // columns' varying byte widths, i.e. a hard cap, not a
-                // row-dependent truncation). The embedded offset-array entry
-                // still records the row's real, pre-truncation end offset,
-                // so once a large enough in-row variable-length value pushes
-                // the row past that cap, reading past here is reading bytes
-                // fn_dblog itself never delivered - not a decode bug, and
-                // not recoverable from this buffer. Surface it as a known
-                // online-capture limitation (same remediation shape as the
-                // off-row branch below) instead of letting the slice/read
-                // throw and fall into the outer catch's misleading
-                // "likely a compressed row" message.
+                // The row buffer this decoder receives can be shorter than
+                // what its own embedded offset array implies. Confirmed
+                // cause #1: fn_dblog's [RowLog Contents 0]/[RowLog Contents 1]
+                // columns truncate at a fixed ~8000-byte cap (verified
+                // byte-for-byte against a row whose un-truncated size should
+                // be ~8039 bytes per its own header/offset-array math, but
+                // arrived here at exactly 8000). There may be other causes
+                // not yet identified - this decoder does not know which
+                // source (online fn_dblog read vs. offline raw-.ldf scan)
+                // produced its input, so the message below stays generic
+                // and the column is flagged for manual review rather than
+                // asserting a specific root cause. Either way, this is
+                // strictly better than the old behavior: reading past here
+                // used to throw and take the entire row down via the outer
+                // catch's "likely a compressed row" guess.
                 if (offsetEntryPos + 2 > row.Length)
                 {
                     if (col is not null)
-                        result[col.Name] = "<value too large for fn_dblog to capture online, not decoded>";
+                    {
+                        result[col.Name] = "<value's byte range exceeds what was captured for this row - not decoded, see NeedsManualReview>";
+                        (possiblyCorruptedColumns ??= []).Add(col.Name);
+                    }
                     continue;
                 }
                 int rawEndOffset = ReadUInt16LE(row, offsetEntryPos);
@@ -315,12 +324,14 @@ public static class RowDecoder
                     }
                     else if (prevEnd > row.Length || endOffset > row.Length)
                     {
-                        // Same fn_dblog truncation as above, just caught one
-                        // level later: the offset-array entry itself was
-                        // still in bounds, but the data it points at (or the
-                        // chained start position from a prior truncated
-                        // column) runs past the bytes actually delivered.
-                        result[col.Name] = "<value too large for fn_dblog to capture online, not decoded>";
+                        // Same as the offset-entry-out-of-bounds case above,
+                        // just caught one level later: the offset-array entry
+                        // itself was still in bounds, but the data it points
+                        // at (or the chained start position from a prior
+                        // out-of-bounds column) runs past the bytes actually
+                        // delivered to this decoder.
+                        result[col.Name] = "<value's byte range exceeds what was captured for this row - not decoded, see NeedsManualReview>";
+                        (possiblyCorruptedColumns ??= []).Add(col.Name);
                     }
                     else
                     {
