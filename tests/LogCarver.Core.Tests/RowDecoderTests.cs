@@ -86,6 +86,38 @@ public class RowDecoderTests
         new ColumnSchema("Big", 3, LeafOffset: 13, LeafNullBit: 3, MaxLength: 9, SystemTypeId: 106, Scale: 4),
     ];
 
+    // dbo.Simple2: Id INT (PK NONCLUSTERED), ColA NVARCHAR(20) NOT NULL,
+    // Sortable DATETIME2 (CLUSTERED, non-unique), ColB NVARCHAR(20) NULL.
+    // Real bug found 2026-10-02 via LogCarverGuard stress testing: a
+    // non-unique clustered index reserves variable-length slot -1 (and
+    // null-bitmap bit 1) for SQL Server's hidden uniquifier column, so
+    // ColA/ColB's own real labels start at -2/-3, not -1/-2 - decoding
+    // without the synthetic ReservedUniquifierSlotName entry SchemaReader
+    // now injects put each NVARCHAR's bytes one slot off from where they
+    // belonged (ColA decoded as "" instead of its real value).
+    private static readonly IReadOnlyList<ColumnSchema> NonUniqueClusteredSchema =
+    [
+        new ColumnSchema(ColumnSchema.ReservedUniquifierSlotName, -1, LeafOffset: -1, LeafNullBit: 1, MaxLength: 0, SystemTypeId: 0),
+        new ColumnSchema("Id", 1, LeafOffset: 12, LeafNullBit: 3, MaxLength: 4, SystemTypeId: 56),
+        new ColumnSchema("ColA", 2, LeafOffset: -2, LeafNullBit: 4, MaxLength: 40, SystemTypeId: 231),
+        new ColumnSchema("Sortable", 3, LeafOffset: 4, LeafNullBit: 2, MaxLength: 8, SystemTypeId: 42, Scale: 7),
+        new ColumnSchema("ColB", 4, LeafOffset: -3, LeafNullBit: 5, MaxLength: 40, SystemTypeId: 231),
+    ];
+
+    // dbo.T3: same shape as Simple2 above but with a 3rd, always-non-NULL
+    // NVARCHAR column (ColC) - confirms the reserved slot's position holds
+    // with no trailing-NULL omission in play at all (every real column
+    // present), not just the 2-real-column/1-omitted case above.
+    private static readonly IReadOnlyList<ColumnSchema> NonUniqueClusteredThreeVarColSchema =
+    [
+        new ColumnSchema(ColumnSchema.ReservedUniquifierSlotName, -1, LeafOffset: -1, LeafNullBit: 1, MaxLength: 0, SystemTypeId: 0),
+        new ColumnSchema("Id", 1, LeafOffset: 12, LeafNullBit: 3, MaxLength: 4, SystemTypeId: 56),
+        new ColumnSchema("ColA", 2, LeafOffset: -2, LeafNullBit: 4, MaxLength: 20, SystemTypeId: 231),
+        new ColumnSchema("Sortable", 3, LeafOffset: 4, LeafNullBit: 2, MaxLength: 8, SystemTypeId: 42, Scale: 7),
+        new ColumnSchema("ColB", 4, LeafOffset: -3, LeafNullBit: 5, MaxLength: 20, SystemTypeId: 231),
+        new ColumnSchema("ColC", 5, LeafOffset: -4, LeafNullBit: 6, MaxLength: 20, SystemTypeId: 231),
+    ];
+
     // dbo.LobOffRowTest: Id INT, Note NVARCHAR(MAX), with
     // `EXEC sp_tableoption 'dbo.LobOffRowTest', 'large value types out of row', 1`
     // forcing Note off-row regardless of its actual content length.
@@ -683,5 +715,47 @@ public class RowDecoderTests
         Assert.Equal(new DateTime(2026, 5, 17, 13, 45, 0), result["SmallDateTimeCol"]);
         Assert.Equal(3.14159265358979, (double)result["FloatCol"]!, 1e-12);
         Assert.Equal(2.71828f, (float)result["RealCol"]!, 1e-5f);
+    }
+
+    [Fact]
+    public void NonUniqueClusteredIndex_ReservedSlotShiftsRealColumns_StillDecodesCorrectly()
+    {
+        // Real captured row for INSERT INTO dbo.Simple2 (Id, ColA, Sortable, ColB)
+        // VALUES (1, 'XYZ', '2026-01-01', NULL) - confirmed via manual
+        // byte-by-byte hex decoding against sys.system_internals_partition_columns'
+        // own reported LeafOffset/LeafNullBit values (see NonUniqueClusteredSchema's
+        // comment). ColB is NULL and NOT trailing-omitted here (unlike the
+        // unique-clustered-index case) because the reserved uniquifier slot
+        // sits after it in the full conceptual ordering - it's no longer
+        // genuinely "last".
+        byte[] row = Convert.FromHexString(
+            "30001000000000000020490B01000000050010020019001F00580059005A00");
+
+        var result = RowDecoder.Decode(row, NonUniqueClusteredSchema);
+
+        Assert.Equal(1, result["Id"]);
+        Assert.Equal("XYZ", result["ColA"]);
+        Assert.Null(result["ColB"]);
+        Assert.False(result.ContainsKey(ColumnSchema.ReservedUniquifierSlotName));
+    }
+
+    [Fact]
+    public void NonUniqueClusteredIndex_ThreeNonNullVariableColumns_AllDecodeToTheRightColumn()
+    {
+        // Real captured row for INSERT INTO dbo.T3 (Id, ColA, Sortable, ColB, ColC)
+        // VALUES (1, 'AAA', '2026-01-01', 'BBB', 'CCC') - every variable-length
+        // column present and non-NULL, so nothing is trailing-omitted; this is
+        // what pins down that the reserved slot is always first (not last, and
+        // not reversing the real columns' own relative order) rather than just
+        // "whichever single slot happens to be empty" in the 2-column case above.
+        byte[] row = Convert.FromHexString(
+            "30001000000000000020490B0100000006000004001D00230029002F00410041004100420042004200430043004300");
+
+        var result = RowDecoder.Decode(row, NonUniqueClusteredThreeVarColSchema);
+
+        Assert.Equal(1, result["Id"]);
+        Assert.Equal("AAA", result["ColA"]);
+        Assert.Equal("BBB", result["ColB"]);
+        Assert.Equal("CCC", result["ColC"]);
     }
 }

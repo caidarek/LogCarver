@@ -42,6 +42,26 @@ namespace LogCarver.Core.SqlServer;
 /// backs up); the public/online LogCarver.Cli currently only warns on
 /// compression and continues, so this is this path's only real protection
 /// against mixed per-partition compression.
+///
+/// Non-unique clustered index: SQL Server reserves variable-length slot
+/// -1 (and null-bitmap bit 1) for a hidden "uniquifier" column that
+/// disambiguates duplicate clustering-key values - reserved whether or
+/// not any given row actually needs one materialized (found for real
+/// 2026-10-02, confirmed via sys.indexes.is_unique plus manual hex
+/// decoding of real fn_dblog row bytes: a table with a non-unique
+/// clustered index on a different column than its PK had its real
+/// variable-length columns' own labels start at -2, not -1, and decoding
+/// without accounting for the gap put each NVARCHAR column's bytes one
+/// slot off from where they belonged - a plausible-looking WRONG value,
+/// not an honest failure). This is invisible to sys.columns (it's not a
+/// user column at all), so GetTableSchemaAsync queries sys.indexes
+/// separately and, when the clustered index exists and is non-unique,
+/// injects a synthetic <see cref="ColumnSchema.ReservedUniquifierSlotName"/>
+/// entry at LeafOffset -1 / LeafNullBit 1 - real columns' own existing
+/// LeafOffset/LeafNullBit values (already correctly reported by SQL
+/// Server as -2, -3, ... / 2, 3, ...) then line up correctly against the
+/// row's actual physical layout without RowDecoder needing to know
+/// anything about uniquifiers itself.
 /// </summary>
 public static class SchemaReader
 {
@@ -55,6 +75,10 @@ public static class SchemaReader
         JOIN sys.columns c ON c.object_id = p.object_id AND c.column_id = ipc.partition_column_id
         WHERE p.object_id = OBJECT_ID(@tableName) AND p.index_id IN (0, 1)
         ORDER BY c.column_id;
+        """;
+
+    private const string ClusteredIndexUniquenessSql = """
+        SELECT is_unique FROM sys.indexes WHERE object_id = OBJECT_ID(@tableName) AND index_id = 1;
         """;
 
     /// <param name="tableName">Schema-qualified, e.g. "dbo.LogTest".</param>
@@ -95,6 +119,30 @@ public static class SchemaReader
             }
             results[columnId] = candidate;
         }
-        return results.Values.OrderBy(c => c.ColumnId).ToList();
+        await reader.CloseAsync();
+
+        var schema = new List<ColumnSchema>(results.Values);
+        if (await HasNonUniqueClusteredIndexAsync(connection, tableName, ct))
+        {
+            schema.Add(new ColumnSchema(
+                Name: ColumnSchema.ReservedUniquifierSlotName, ColumnId: -1,
+                LeafOffset: -1, LeafNullBit: 1, MaxLength: 0, SystemTypeId: 0));
+        }
+
+        return schema.OrderBy(c => c.ColumnId).ToList();
+    }
+
+    private static async Task<bool> HasNonUniqueClusteredIndexAsync(
+        SqlConnection connection, string tableName, CancellationToken ct)
+    {
+        await using var command = new SqlCommand(ClusteredIndexUniquenessSql, connection);
+        command.Parameters.AddWithValue("@tableName", tableName);
+        var isUnique = await command.ExecuteScalarAsync(ct);
+        // No row at all = heap (no clustered index) - the uniquifier
+        // mechanism only exists for a non-unique CLUSTERED index, so a
+        // heap never needs this regardless of its own PK/unique
+        // constraints (those are ordinary nonclustered indexes, with
+        // nothing analogous to a uniquifier).
+        return isUnique is bool b && !b;
     }
 }

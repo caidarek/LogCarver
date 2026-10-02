@@ -1,3 +1,4 @@
+using LogCarver.Core;
 using LogCarver.Core.SqlServer;
 using Microsoft.Data.SqlClient;
 using Xunit;
@@ -169,6 +170,73 @@ public class SchemaReaderTests(SqlServerFixture fixture)
         var ex = await Assert.ThrowsAsync<NotSupportedException>(
             () => SchemaReader.GetTableSchemaAsync(connection, partitionedTable));
         Assert.Contains("inconsistent physical layout", ex.Message);
+    }
+
+    /// <summary>
+    /// Regression test for a real bug found 2026-10-02 via LogCarverGuard
+    /// stress testing: a table whose CLUSTERED index is non-unique reserves
+    /// a hidden "uniquifier" slot invisible to sys.columns, shifting every
+    /// real variable-length column's own LeafOffset label down by one -
+    /// decoding without accounting for this put NVARCHAR columns' bytes one
+    /// slot off from where they belonged (a plausible-looking wrong value,
+    /// not an honest failure - see ColumnSchema.LeafOffset's doc comment).
+    /// </summary>
+    [Fact]
+    public async Task GetTableSchemaAsync_OnATableWithNonUniqueClusteredIndex_InjectsTheReservedSlot()
+    {
+        const string table = "dbo.NonUniqueClusteredTestTable";
+        await using var setup = new SqlConnection(fixture.ConnectionString);
+        await setup.OpenAsync();
+        await using (var create = new SqlCommand(
+            $"IF OBJECT_ID('{table}') IS NOT NULL DROP TABLE {table}; " +
+            $"CREATE TABLE {table} (Id INT NOT NULL, ColA NVARCHAR(20) NOT NULL, " +
+            "Sortable DATETIME2 NOT NULL, ColB NVARCHAR(20) NULL); " +
+            $"ALTER TABLE {table} ADD CONSTRAINT PK_NonUniqueClusteredTestTable PRIMARY KEY NONCLUSTERED (Id); " +
+            $"CREATE CLUSTERED INDEX IX_NonUniqueClusteredTestTable ON {table}(Sortable);", // non-unique
+            setup))
+        {
+            await create.ExecuteNonQueryAsync();
+        }
+
+        await using var connection = new SqlConnection(fixture.ConnectionString);
+        await connection.OpenAsync();
+        var schema = await SchemaReader.GetTableSchemaAsync(connection, table);
+
+        Assert.Equal(5, schema.Count); // 4 real columns + the synthetic reserved slot
+        var reserved = schema.Single(c => c.Name == ColumnSchema.ReservedUniquifierSlotName);
+        Assert.Equal(-1, reserved.LeafOffset);
+        Assert.Equal(1, reserved.LeafNullBit);
+
+        var colA = schema.Single(c => c.Name == "ColA");
+        Assert.Equal(-2, colA.LeafOffset); // shifted down by one because of the reserved slot above
+    }
+
+    /// <summary>Same schema shape, but UNIQUE clustered - no reservation needed, confirms this isn't triggered by non-PK clustering alone.</summary>
+    [Fact]
+    public async Task GetTableSchemaAsync_OnATableWithUniqueClusteredIndex_DoesNotInjectAnything()
+    {
+        const string table = "dbo.UniqueClusteredTestTable";
+        await using var setup = new SqlConnection(fixture.ConnectionString);
+        await setup.OpenAsync();
+        await using (var create = new SqlCommand(
+            $"IF OBJECT_ID('{table}') IS NOT NULL DROP TABLE {table}; " +
+            $"CREATE TABLE {table} (Id INT NOT NULL, ColA NVARCHAR(20) NOT NULL, " +
+            "Sortable DATETIME2 NOT NULL, ColB NVARCHAR(20) NULL); " +
+            $"ALTER TABLE {table} ADD CONSTRAINT PK_UniqueClusteredTestTable PRIMARY KEY NONCLUSTERED (Id); " +
+            $"CREATE UNIQUE CLUSTERED INDEX IX_UniqueClusteredTestTable ON {table}(Sortable);",
+            setup))
+        {
+            await create.ExecuteNonQueryAsync();
+        }
+
+        await using var connection = new SqlConnection(fixture.ConnectionString);
+        await connection.OpenAsync();
+        var schema = await SchemaReader.GetTableSchemaAsync(connection, table);
+
+        Assert.Equal(4, schema.Count); // just the 4 real columns, no reserved slot
+        Assert.DoesNotContain(schema, c => c.Name == ColumnSchema.ReservedUniquifierSlotName);
+        var colA = schema.Single(c => c.Name == "ColA");
+        Assert.Equal(-1, colA.LeafOffset);
     }
 
     [Fact]

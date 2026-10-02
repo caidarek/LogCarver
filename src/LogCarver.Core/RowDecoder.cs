@@ -286,7 +286,17 @@ public static class RowDecoder
             int prevEnd = dataStart;
             for (int i = 0; i < varColCount; i++)
             {
-                ColumnSchema? col = i < varCols.Count ? varCols[i] : null;
+                // The reserved-uniquifier sentinel (see SchemaReader's doc
+                // comment) occupies its real position in varCols - LeafOffset
+                // -1 sorts it first - so the physical slot numbering lines up
+                // correctly for every REAL column after it, but it's never
+                // itself something to decode or write a value for. Treating
+                // it as "no column known for this slot" (same as the
+                // i >= varCols.Count case below) is enough: prevEnd still
+                // chains across it unconditionally further down, which is
+                // all a slot with no real column needs to contribute.
+                ColumnSchema? col = i < varCols.Count && varCols[i].Name != ColumnSchema.ReservedUniquifierSlotName
+                    ? varCols[i] : null;
                 int offsetEntryPos = offsetArrayStart + i * 2;
 
                 // The row buffer this decoder receives can be shorter than
@@ -394,7 +404,8 @@ public static class RowDecoder
             // that's last in declaration order) - verified in 研究紀錄 第九節.
             for (int i = varColCount; i < varCols.Count; i++)
             {
-                result[varCols[i].Name] = null;
+                if (varCols[i].Name != ColumnSchema.ReservedUniquifierSlotName)
+                    result[varCols[i].Name] = null;
             }
         }
 
