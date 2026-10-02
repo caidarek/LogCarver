@@ -132,6 +132,35 @@ public class UndoSqlGeneratorTests
     }
 
     [Fact]
+    public void BoolValue_FormatsAsOneOrZero_NotThrows()
+    {
+        // Same class of gap as the decimal/bigint cases above, found via
+        // LogCarverGuard stress testing 2026-10-02: SqlStatementBuilder.
+        // FormatSqlLiteral had no case for `bool`, so any row with a BIT
+        // column (decoded to C# bool in RowDecoder) crashed undo
+        // generation outright with "Cannot format a SQL literal for value
+        // of type System.Boolean" - T-SQL has no boolean literal, BIT is
+        // written/compared as 1/0.
+        var row = new Dictionary<string, object?> { ["Id"] = 5, ["IsActive"] = true };
+        var evt = new RowEvent("lsn1", RowEventKind.Insert, null, row, null, null, "0001:0F", 1);
+
+        var sql = UndoSqlGenerator.Generate(evt, "dbo.Orders");
+
+        Assert.Equal("DELETE FROM [dbo].[Orders] WHERE [Id] = 5 AND [IsActive] = 1;", sql);
+    }
+
+    [Fact]
+    public void FalseBoolValue_FormatsAsZero()
+    {
+        var row = new Dictionary<string, object?> { ["Id"] = 5, ["IsActive"] = false };
+        var evt = new RowEvent("lsn1", RowEventKind.Insert, null, row, null, null, "0001:0F", 1);
+
+        var sql = UndoSqlGenerator.Generate(evt, "dbo.Orders");
+
+        Assert.Equal("DELETE FROM [dbo].[Orders] WHERE [Id] = 5 AND [IsActive] = 0;", sql);
+    }
+
+    [Fact]
     public void TableNameAlreadyBracketQuoted_IsNotDoubleEscaped()
     {
         // Regression test for a real bug found via customer testing on

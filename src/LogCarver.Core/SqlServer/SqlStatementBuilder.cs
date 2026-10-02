@@ -90,6 +90,15 @@ internal static class SqlStatementBuilder
         // column in every other row was lost too, not just this value.
         decimal m => m.ToString(System.Globalization.CultureInfo.InvariantCulture),
         string s => $"N'{s.Replace("'", "''")}'",
+        // T-SQL has no boolean literal - BIT columns are written/compared
+        // as 1/0. Same missing-case pattern as bigint/decimal above: found
+        // 2026-10-02 via LogCarverGuard stress testing against a BIT
+        // column, where it crashed undo generation outright with this same
+        // NotSupportedException (caught further up the stack now, so it no
+        // longer loses the whole audit record - see GuardedSqlExecutor's
+        // UndoGenerationError - but the underlying gap is still real and
+        // worth fixing at the source).
+        bool b => b ? "1" : "0",
         _ => throw new NotSupportedException($"Cannot format a SQL literal for value of type {value.GetType()}."),
     };
 }
